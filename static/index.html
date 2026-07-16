@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>看板</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- 顶部工具栏 -->
+    <header class="topbar">
+        <div class="topbar-left">
+            <h1 class="logo">📋 看板</h1>
+        </div>
+        <div class="topbar-center">
+            <button id="btn-board" class="nav-btn active" onclick="showView('board')">看板</button>
+            <button id="btn-history" class="nav-btn" onclick="showView('history')">历史</button>
+        </div>
+        <div class="topbar-right">
+            <button class="icon-btn" title="刷新" onclick="refresh()">🔄</button>
+            <button class="icon-btn" title="导出JSON" onclick="exportJson()">⬇ 导出</button>
+            <button class="icon-btn" title="备份数据库" onclick="backupDb()">💾 备份</button>
+            <button class="icon-btn add-btn" title="新增列" onclick="addColumn()">+ 新列</button>
+        </div>
+    </header>
+
+    <!-- ============ 看板视图 ============ -->
+    <main id="view-board" class="board-view">
+        <div id="board" class="board">
+            <!-- 列由 JS 渲染 -->
+        </div>
+    </main>
+
+    <!-- ============ 历史搜索视图 ============ -->
+    <main id="view-history" class="history-view" hidden>
+        <div class="search-panel">
+            <input type="text" id="search-q" placeholder="搜索标题 / 描述 / 标签…" onkeydown="if(event.key==='Enter')doSearch()">
+            <label>优先级
+                <select id="search-priority">
+                    <option value="">全部</option>
+                    <option value="high">高</option>
+                    <option value="medium">中</option>
+                    <option value="low">低</option>
+                </select>
+            </label>
+            <label>截止从 <input type="date" id="search-from"></label>
+            <label>截止到 <input type="date" id="search-to"></label>
+            <label class="checkbox"><input type="checkbox" id="search-all"> 也包含活跃卡片</label>
+            <button onclick="doSearch()">搜索</button>
+            <button class="ghost" onclick="resetSearch()">重置</button>
+        </div>
+        <div class="search-meta" id="search-meta"></div>
+        <div id="search-results" class="search-results"></div>
+    </main>
+
+    <!-- ============ 卡片编辑弹窗 ============ -->
+    <div id="card-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <div class="modal-header">
+                <h2 id="modal-title-text">编辑卡片</h2>
+                <button class="icon-btn danger" title="删除(归档)" onclick="deleteCurrentCard()">🗑</button>
+                <button class="icon-btn" title="关闭" onclick="closeCardModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <label>标题 <span class="req">*</span>
+                    <input type="text" id="card-title" placeholder="卡片标题">
+                </label>
+                <div class="field">
+                    <span class="field-label">描述</span>
+                    <div class="editor-toolbar" id="editor-toolbar">
+                        <button type="button" title="项目符号" data-cmd="insertUnorderedList">
+                            <svg viewBox="0 0 24 24"><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="6" x2="20" y2="6"/><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="12" x2="20" y2="12"/><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="18" x2="20" y2="18"/></svg>
+                        </button>
+                        <button type="button" title="编号" data-cmd="insertOrderedList">
+                            <svg viewBox="0 0 24 24"><text x="3" y="9" font-size="7" fill="currentColor" stroke="none">1.</text><text x="3" y="17" font-size="7" fill="currentColor" stroke="none">2.</text><line x1="10" y1="7" x2="20" y2="7"/><line x1="10" y1="15" x2="20" y2="15"/></svg>
+                        </button>
+                        <button type="button" title="增加缩进" data-cmd="indent">
+                            <svg viewBox="0 0 24 24"><polyline points="3,8 7,12 3,16"/><line x1="21" y1="6" x2="11" y2="6"/><line x1="21" y1="18" x2="11" y2="18"/><line x1="21" y1="12" x2="11" y2="12"/></svg>
+                        </button>
+                        <button type="button" title="减少缩进" data-cmd="outdent">
+                            <svg viewBox="0 0 24 24"><polyline points="21,8 17,12 21,16"/><line x1="3" y1="6" x2="13" y2="6"/><line x1="3" y1="18" x2="13" y2="18"/><line x1="3" y1="12" x2="13" y2="12"/></svg>
+                        </button>
+                        <span class="tb-sep"></span>
+                        <button type="button" title="斜体" data-cmd="italic">
+                            <svg viewBox="0 0 24 24"><line x1="19" y1="5" x2="10" y2="5"/><line x1="14" y1="19" x2="5" y2="19"/><line x1="15" y1="5" x2="9" y2="19"/></svg>
+                        </button>
+                        <button type="button" title="下划线" data-cmd="underline">
+                            <svg viewBox="0 0 24 24"><path d="M6 4v8a6 6 0 0 0 12 0V4"/><line x1="4" y1="20" x2="20" y2="20"/></svg>
+                        </button>
+                        <button type="button" title="删除线" data-cmd="strikeThrough">
+                            <svg viewBox="0 0 24 24"><line x1="4" y1="12" x2="20" y2="12"/><path d="M8 8c0-2 2-3 4-3s4 1 4 3M8 16c0 2 2 3 4 3s4-1 4-3"/></svg>
+                        </button>
+                        <span class="tb-sep"></span>
+                        <button type="button" title="撤销" data-cmd="undo">
+                            <svg viewBox="0 0 24 24"><polyline points="9,14 4,9 9,4"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H10"/></svg>
+                        </button>
+                        <button type="button" title="重做" data-cmd="redo">
+                            <svg viewBox="0 0 24 24"><polyline points="15,14 20,9 15,4"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H14"/></svg>
+                        </button>
+                    </div>
+                    <div id="card-description" class="editor" contenteditable="true" data-placeholder="详细描述…"></div>
+                </div>
+                <label><span class="label-inline">标签 <small>(逗号分隔)</small></span>
+                    <input type="text" id="card-labels" placeholder="如: bug, 紧急">
+                </label>
+                <label><span class="label-inline">截止日期 <small>(时间可选)</small></span>
+                    <div class="due-inputs">
+                        <input type="date" id="card-due" placeholder="日期">
+                        <input type="time" id="card-due-time" placeholder="时间">
+                    </div>
+                </label>
+                <label>优先级
+                    <select id="card-priority">
+                        <option value="high">高</option>
+                        <option value="medium" selected>中</option>
+                        <option value="low">低</option>
+                    </select>
+                </label>
+            </div>
+            <div class="modal-footer">
+                <span id="card-meta" class="card-meta"></span>
+                <div>
+                    <button class="ghost" onclick="closeCardModal()">取消</button>
+                    <button class="primary" onclick="saveCard()">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ 新增列弹窗 ============ -->
+    <div id="column-modal" class="modal-overlay" hidden>
+        <div class="modal small">
+            <div class="modal-header">
+                <h2>新增列</h2>
+                <button class="icon-btn" onclick="closeColumnModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <label>列名 <span class="req">*</span>
+                    <input type="text" id="column-name" placeholder="如: 待办">
+                </label>
+            </div>
+            <div class="modal-footer">
+                <div></div>
+                <div>
+                    <button class="ghost" onclick="closeColumnModal()">取消</button>
+                    <button class="primary" onclick="saveColumn()">确定</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast 提示 -->
+    <div id="toast" class="toast" hidden></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# 本地数据库（运行时生成，含真实看板数据，不入库）
+*.db
+kanban.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
