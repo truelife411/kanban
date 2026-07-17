@@ -68,35 +68,35 @@
                 <div class="field">
                     <span class="field-label">描述</span>
                     <div class="editor-toolbar" id="editor-toolbar">
-                        <button type="button" title="项目符号" data-cmd="insertUnorderedList">
-                            <svg viewBox="0 0 24 24"><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="6" x2="20" y2="6"/><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="12" x2="20" y2="12"/><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="18" x2="20" y2="18"/></svg>
-                        </button>
-                        <button type="button" title="编号" data-cmd="insertOrderedList">
-                            <svg viewBox="0 0 24 24"><text x="3" y="9" font-size="7" fill="currentColor" stroke="none">1.</text><text x="3" y="17" font-size="7" fill="currentColor" stroke="none">2.</text><line x1="10" y1="7" x2="20" y2="7"/><line x1="10" y1="15" x2="20" y2="15"/></svg>
-                        </button>
-                        <button type="button" title="增加缩进" data-cmd="indent">
-                            <svg viewBox="0 0 24 24"><polyline points="3,8 7,12 3,16"/><line x1="21" y1="6" x2="11" y2="6"/><line x1="21" y1="18" x2="11" y2="18"/><line x1="21" y1="12" x2="11" y2="12"/></svg>
-                        </button>
-                        <button type="button" title="减少缩进" data-cmd="outdent">
-                            <svg viewBox="0 0 24 24"><polyline points="21,8 17,12 21,16"/><line x1="3" y1="6" x2="13" y2="6"/><line x1="3" y1="18" x2="13" y2="18"/><line x1="3" y1="12" x2="13" y2="12"/></svg>
-                        </button>
-                        <span class="tb-sep"></span>
-                        <button type="button" title="斜体" data-cmd="italic">
-                            <svg viewBox="0 0 24 24"><line x1="19" y1="5" x2="10" y2="5"/><line x1="14" y1="19" x2="5" y2="19"/><line x1="15" y1="5" x2="9" y2="19"/></svg>
-                        </button>
-                        <button type="button" title="下划线" data-cmd="underline">
-                            <svg viewBox="0 0 24 24"><path d="M6 4v8a6 6 0 0 0 12 0V4"/><line x1="4" y1="20" x2="20" y2="20"/></svg>
-                        </button>
-                        <button type="button" title="删除线" data-cmd="strikeThrough">
-                            <svg viewBox="0 0 24 24"><line x1="4" y1="12" x2="20" y2="12"/><path d="M8 8c0-2 2-3 4-3s4 1 4 3M8 16c0 2 2 3 4 3s4-1 4-3"/></svg>
-                        </button>
-                        <span class="tb-sep"></span>
-                        <button type="button" title="撤销" data-cmd="undo">
-                            <svg viewBox="0 0 24 24"><polyline points="9,14 4,9 9,4"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H10"/></svg>
-                        </button>
-                        <button type="button" title="重做" data-cmd="redo">
-                            <svg viewBox="0 0 24 24"><polyline points="15,14 20,9 15,4"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H14"/></svg>
-                        </button>
+                        <div class="tb-group" role="group" aria-label="列表和缩进">
+                            <button type="button" title="项目符号" aria-label="项目符号" data-cmd="insertUnorderedList">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="18" r="1.25" fill="currentColor" stroke="none"/><path d="M10 6h9M10 12h9M10 18h9"/></svg>
+                            </button>
+                            <button type="button" title="编号" aria-label="编号" data-cmd="insertOrderedList">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h1v4M4 9h2M4 13.5c.4-.5 2-.6 2 .5 0 1-2 1.5-2 3h2M10 6h9M10 12h9M10 18h9"/></svg>
+                            </button>
+                            <button type="button" title="减少缩进" aria-label="减少缩进" data-cmd="outdent">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h9M10 12h9M10 18h9M7 9l-3 3 3 3"/></svg>
+                            </button>
+                            <button type="button" title="增加缩进" aria-label="增加缩进" data-cmd="indent">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h9M10 12h9M10 18h9M4 9l3 3-3 3"/></svg>
+                            </button>
+                        </div>
+                        <span class="tb-sep" aria-hidden="true"></span>
+                        <div class="tb-group" role="group" aria-label="文字格式">
+                            <button type="button" title="斜体" aria-label="斜体" data-cmd="italic"><span class="tb-letter italic">I</span></button>
+                            <button type="button" title="下划线" aria-label="下划线" data-cmd="underline"><span class="tb-letter underline">U</span></button>
+                            <button type="button" title="删除线" aria-label="删除线" data-cmd="strikeThrough"><span class="tb-letter strike">S</span></button>
+                        </div>
+                        <span class="tb-sep tb-sep-history" aria-hidden="true"></span>
+                        <div class="tb-group tb-history" role="group" aria-label="操作历史">
+                            <button type="button" title="撤销" aria-label="撤销" data-cmd="undo">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8l-4 4 4 4M5 12h8a6 6 0 0 1 6 6"/></svg>
+                            </button>
+                            <button type="button" title="重做" aria-label="重做" data-cmd="redo">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 8l4 4-4 4M19 12h-8a6 6 0 0 0-6 6"/></svg>
+                            </button>
+                        </div>
                     </div>
                     <div id="card-description" class="editor" contenteditable="true" data-placeholder="详细描述…"></div>
                 </div>

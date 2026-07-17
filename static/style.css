@@ -293,54 +293,75 @@ input[type=text], input[type=date], textarea, select {
 /* ============ 富文本编辑器 ============ */
 .editor-toolbar {
     display: flex;
-    flex-wrap: wrap;
-    gap: 2px;
-    padding: 5px 7px;
+    gap: 6px;
+    padding: 6px 8px;
     border: 2px solid var(--border);
-    border-bottom: none;
-    border-radius: 6px 6px 0 0;
-    background: #f4f5f7;
+    border-bottom: 1px solid var(--border);
+    border-radius: 7px 7px 0 0;
+    background: #fff;
     align-items: center;
+}
+.tb-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
 }
 .editor-toolbar button {
     background: transparent;
     border: none;
+    border-radius: 6px;
+    color: #44546f;
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
     padding: 0;
-    border-radius: 4px;
-    color: #555;
-    width: 30px;
-    height: 30px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    transition: background .15s, color .15s;
+    transition: background-color .15s, color .15s, box-shadow .15s;
 }
-.editor-toolbar button:hover {
-    background: #e8eaed;
-    color: #222;
-}
-.editor-toolbar button:active {
-    background: #d0d4d9;
-}
-/* 极简 SVG 图标：Lucide 规范 24×24 / 2px 描边 / 圆角端点 */
-.editor-toolbar svg {
-    width: 20px;
-    height: 20px;
+.editor-toolbar button svg {
+    width: 18px;
+    height: 18px;
     fill: none;
     stroke: currentColor;
-    stroke-width: 2;
+    stroke-width: 1.8;
     stroke-linecap: round;
     stroke-linejoin: round;
-    pointer-events: none;
+}
+.tb-letter {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 17px;
+    line-height: 1;
+    font-weight: 700;
+}
+.tb-letter.italic { font-style: italic; }
+.tb-letter.underline { text-decoration: underline; text-underline-offset: 3px; }
+.tb-letter.strike { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+.editor-toolbar button:hover {
+    background: #eef2f7;
+    color: var(--primary);
+}
+.editor-toolbar button:focus-visible {
+    outline: 2px solid rgba(0,121,191,.35);
+    outline-offset: 1px;
+}
+.editor-toolbar button:active {
+    background: #deebff;
+    color: var(--primary-hover);
+    box-shadow: inset 0 0 0 1px rgba(0,121,191,.12);
 }
 .tb-sep {
     display: inline-block;
     width: 1px;
-    height: 18px;
-    background: #e0e2e6;
-    margin: 6px 5px;
+    height: 20px;
+    background: var(--border);
+    margin: 0 1px;
     flex-shrink: 0;
 }
+.tb-history { margin-left: auto; }
+.tb-sep-history { margin-left: auto; }
+.tb-sep-history + .tb-history { margin-left: 0; }
 .editor {
     min-height: 90px;
     max-height: 260px;
