@@ -1,740 +1,701 @@
 # -*- coding: utf-8 -*-
-"""
-看板系统后端 —— 纯 Python 标准库实现
-依赖: 仅 Python 3 自带模块 (http.server, sqlite3, json, urllib 等)
-运行: python app.py  ->  浏览器打开 http://localhost:8000
-"""
+"""看板系统后端：Python 标准库 + SQLite。"""
 
 import json
 import os
 import re
 import sqlite3
 import sys
+import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime
+from html import escape
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
-# ---------------------------------------------------------------------------
-# 全局配置
-# ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "kanban.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-HOST = "0.0.0.0"
-PORT = 8000
-
+BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+HOST = os.environ.get("KANBAN_HOST", "127.0.0.1")
+PORT = int(os.environ.get("KANBAN_PORT", "8000"))
+SCHEMA_VERSION = 2
+EXPORT_VERSION = 2
+MAX_JSON_BODY = 1024 * 1024
+MAX_IMPORT_BODY = 10 * 1024 * 1024
 VALID_PRIORITY = ("high", "medium", "low")
+DB_MAINTENANCE_LOCK = threading.RLock()
 
 
-# ---------------------------------------------------------------------------
-# 数据库初始化与连接
-# ---------------------------------------------------------------------------
-def get_conn():
-    """每次请求新建连接。SQLite 对短连接开销很小，且避免线程安全问题。"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row          # 返回类似字典的行
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
-def init_db():
-    """首次运行自动建表 + 插入默认三列。"""
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS columns (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            name      TEXT    NOT NULL,
-            position  INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cards (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            column_id   INTEGER NOT NULL,
-            title       TEXT    NOT NULL,
-            description TEXT    DEFAULT '',
-            labels      TEXT    DEFAULT '',
-            due_date    TEXT    DEFAULT '',
-            priority    TEXT    NOT NULL DEFAULT 'medium',
-            position    INTEGER NOT NULL DEFAULT 0,
-            archived    INTEGER NOT NULL DEFAULT 0,
-            created_at  TEXT    NOT NULL,
-            updated_at  TEXT    NOT NULL,
-            FOREIGN KEY (column_id) REFERENCES columns(id) ON DELETE CASCADE
-        )
-        """
-    )
-
-    # 仅当 columns 表为空时插入默认列
-    cur.execute("SELECT COUNT(*) AS c FROM columns")
-    if cur.fetchone()["c"] == 0:
-        defaults = [("待办", 0), ("进行中", 1), ("已完成", 2)]
-        cur.executemany(
-            "INSERT INTO columns (name, position) VALUES (?, ?)", defaults
-        )
-
-    conn.commit()
-    conn.close()
-
-
-# ---------------------------------------------------------------------------
-# 工具函数
-# ---------------------------------------------------------------------------
 def now_iso():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def row_to_card(row):
-    """把数据库行转换成前端需要的 dict。"""
-    return {
-        "id": row["id"],
-        "column_id": row["column_id"],
-        "title": row["title"],
-        "description": row["description"] or "",
-        "labels": row["labels"] or "",
-        "due_date": row["due_date"] or "",
-        "priority": row["priority"],
-        "position": row["position"],
-        "archived": row["archived"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
+def get_conn(path=None):
+    conn = sqlite3.connect(path or DB_PATH, timeout=5.0, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
 
 
-def row_to_column(row):
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "position": row["position"],
-    }
+@contextmanager
+def transaction(conn):
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
 
 
-# ---------------------------------------------------------------------------
-# HTTP 响应辅助
-# ---------------------------------------------------------------------------
 class ApiError(Exception):
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, code="BAD_REQUEST", details=None):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.code = code
+        self.details = details
 
 
-# ---------------------------------------------------------------------------
-# 业务逻辑：columns
-# ---------------------------------------------------------------------------
-def list_columns(conn):
-    rows = conn.execute(
-        "SELECT * FROM columns ORDER BY position ASC, id ASC"
-    ).fetchall()
-    return [row_to_column(r) for r in rows]
+def fail(message, status=422, code="VALIDATION_ERROR", field=None):
+    raise ApiError(message, status, code, {"field": field} if field else None)
 
 
-def create_column(conn, data):
-    name = (data.get("name") or "").strip()
-    if not name:
-        raise ApiError("列名不能为空")
-    # 新列 position 取当前最大值 +1
-    row = conn.execute("SELECT MAX(position) AS m FROM columns").fetchone()
-    pos = (row["m"] or -1) + 1
-    cur = conn.execute(
-        "INSERT INTO columns (name, position) VALUES (?, ?)", (name, pos)
-    )
-    conn.commit()
-    return row_to_column(
-        conn.execute("SELECT * FROM columns WHERE id = ?", (cur.lastrowid,)).fetchone()
-    )
+def require_object(value):
+    if not isinstance(value, dict):
+        fail("JSON 请求体必须是对象", 400, "INVALID_JSON")
+    return value
 
 
-def update_column(conn, cid, data):
-    row = conn.execute("SELECT * FROM columns WHERE id = ?", (cid,)).fetchone()
-    if row is None:
-        raise ApiError("列不存在", 404)
-    name = (data.get("name") or row["name"]).strip() or row["name"]
-    position = data.get("position")
-    if position is None:
-        position = row["position"]
-    conn.execute(
-        "UPDATE columns SET name = ?, position = ? WHERE id = ?",
-        (name, position, cid),
-    )
-    conn.commit()
-    return row_to_column(
-        conn.execute("SELECT * FROM columns WHERE id = ?", (cid,)).fetchone()
-    )
+def require_int(value, field, minimum=1):
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        fail("%s 必须是大于等于 %s 的整数" % (field, minimum), field=field)
+    return value
 
 
-def delete_column(conn, cid):
-    """删除列前，先把该列下活跃卡片归档（历史保留），再删列。"""
-    row = conn.execute("SELECT * FROM columns WHERE id = ?", (cid,)).fetchone()
-    if row is None:
-        raise ApiError("列不存在", 404)
-    conn.execute("UPDATE cards SET archived = 1 WHERE column_id = ? AND archived = 0", (cid,))
-    conn.execute("DELETE FROM columns WHERE id = ?", (cid,))
-    conn.commit()
-    return {"ok": True}
+def require_string(value, field, minimum=0, maximum=1000, trim=True):
+    if not isinstance(value, str):
+        fail("%s 必须是字符串" % field, field=field)
+    value = value.strip() if trim else value
+    if len(value) < minimum:
+        fail("%s 不能为空" % field, field=field)
+    if len(value) > maximum:
+        fail("%s 不能超过 %s 个字符" % (field, maximum), field=field)
+    return value
 
 
-def reorder_columns(conn, ids):
-    """按给定的 id 顺序批量更新列的 position。
-
-    ids: [id1, id2, ...] 期望的顺序。
-    """
-    if not isinstance(ids, list) or not ids:
-        raise ApiError("需要传入列 id 列表")
-    # 校验 id 都是整数且存在
-    valid_ids = set()
-    for r in conn.execute("SELECT id FROM columns").fetchall():
-        valid_ids.add(r["id"])
-    for i in ids:
-        if not isinstance(i, int):
-            raise ApiError("列 id 必须是整数")
-        if i not in valid_ids:
-            raise ApiError("列 id %s 不存在" % i)
-    for idx, cid in enumerate(ids):
-        conn.execute(
-            "UPDATE columns SET position = ? WHERE id = ?", (idx, cid)
-        )
-    conn.commit()
-    return list_columns(conn)
+def validate_priority(value):
+    if value not in VALID_PRIORITY:
+        fail("优先级必须是 high、medium 或 low", field="priority")
+    return value
 
 
-# ---------------------------------------------------------------------------
-# 业务逻辑：cards
-# ---------------------------------------------------------------------------
-def list_cards(conn, column_id=None, archived=0):
-    sql = "SELECT * FROM cards WHERE archived = ?"
-    params = [archived]
-    if column_id is not None:
-        sql += " AND column_id = ?"
-        params.append(column_id)
-    sql += " ORDER BY position ASC, id ASC"
-    rows = conn.execute(sql, params).fetchall()
-    return [row_to_card(r) for r in rows]
+def validate_due_date(value):
+    value = require_string(value, "due_date", 0, 16)
+    if not value:
+        return ""
+    if len(value) not in (10, 16):
+        fail("截止日期格式必须是 YYYY-MM-DD 或 YYYY-MM-DD HH:MM", field="due_date")
+    try:
+        datetime.strptime(value, "%Y-%m-%d %H:%M" if len(value) == 16 else "%Y-%m-%d")
+    except ValueError:
+        fail("截止日期无效", field="due_date")
+    return value
 
 
-def get_card(conn, cid):
-    row = conn.execute("SELECT * FROM cards WHERE id = ?", (cid,)).fetchone()
-    if row is None:
-        raise ApiError("卡片不存在", 404)
-    return row_to_card(row)
+class SafeHtmlParser(HTMLParser):
+    allowed = {"p", "br", "ul", "ol", "li", "strong", "b", "em", "i", "u", "s"}
+    blocked_tags = {"script", "style", "iframe", "object", "svg"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.output = []
+        self.blocked = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in self.blocked_tags:
+            self.blocked += 1
+        elif not self.blocked and tag in self.allowed:
+            self.output.append("<%s>" % tag)
+
+    def handle_startendtag(self, tag, attrs):
+        if not self.blocked and tag.lower() == "br":
+            self.output.append("<br>")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in self.blocked_tags:
+            self.blocked = max(0, self.blocked - 1)
+        elif not self.blocked and tag in self.allowed and tag != "br":
+            self.output.append("</%s>" % tag)
+
+    def handle_data(self, data):
+        if not self.blocked:
+            self.output.append(escape(data, quote=False))
 
 
-def create_card(conn, data):
-    column_id = data.get("column_id")
-    if column_id is None:
-        raise ApiError("缺少 column_id")
-    title = (data.get("title") or "").strip()
-    if not title:
-        raise ApiError("标题不能为空")
-    # 校验列存在
-    if conn.execute("SELECT 1 FROM columns WHERE id = ?", (column_id,)).fetchone() is None:
-        raise ApiError("所属列不存在", 404)
-
-    labels = (data.get("labels") or "").strip()
-    due_date = (data.get("due_date") or "").strip()
-    priority = (data.get("priority") or "medium").strip()
-    if priority not in VALID_PRIORITY:
-        priority = "medium"
-
-    # 新卡片 position 取该列内最大值 +1
-    row = conn.execute(
-        "SELECT MAX(position) AS m FROM cards WHERE column_id = ? AND archived = 0",
-        (column_id,),
-    ).fetchone()
-    pos = (row["m"] or -1) + 1
-
-    ts = now_iso()
-    cur = conn.execute(
-        """
-        INSERT INTO cards
-            (column_id, title, description, labels, due_date, priority,
-             position, archived, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-        """,
-        (
-            column_id,
-            title,
-            (data.get("description") or "").strip(),
-            labels,
-            due_date,
-            priority,
-            pos,
-            ts,
-            ts,
-        ),
-    )
-    conn.commit()
-    return get_card(conn, cur.lastrowid)
+def sanitize_description(value):
+    parser = SafeHtmlParser()
+    parser.feed(require_string(value, "description", 0, 100000, trim=False))
+    parser.close()
+    return "".join(parser.output).strip()
 
 
-def update_card(conn, cid, data):
-    old = conn.execute("SELECT * FROM cards WHERE id = ?", (cid,)).fetchone()
-    if old is None:
-        raise ApiError("卡片不存在", 404)
-
-    title = (data.get("title") or old["title"]).strip() or old["title"]
-    description = data.get("description", old["description"] or "")
-    labels = data.get("labels", old["labels"] or "")
-    due_date = data.get("due_date", old["due_date"] or "")
-    priority = data.get("priority", old["priority"])
-    if priority not in VALID_PRIORITY:
-        priority = old["priority"]
-
-    conn.execute(
-        """
-        UPDATE cards
-        SET title = ?, description = ?, labels = ?, due_date = ?,
-            priority = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (title, description, labels, due_date, priority, now_iso(), cid),
-    )
-    conn.commit()
-    return get_card(conn, cid)
-
-
-def move_card(conn, cid, data):
-    """移动卡片到目标列的目标位置（跨列/同列重排都走这里）。
-
-    请求体: { "column_id": int, "position": int }
-    position 是希望插入到的索引（0 表示最前）。实现采用"占位+重排"策略。
-    """
-    old = conn.execute("SELECT * FROM cards WHERE id = ?", (cid,)).fetchone()
-    if old is None:
-        raise ApiError("卡片不存在", 404)
-    new_col = data.get("column_id")
-    new_pos = data.get("position")
-    if new_col is None or new_pos is None:
-        raise ApiError("需要 column_id 和 position")
-
-    if conn.execute("SELECT 1 FROM columns WHERE id = ?", (new_col,)).fetchone() is None:
-        raise ApiError("目标列不存在", 404)
-
-    old_col = old["column_id"]
-
-    # 1) 先把被拖卡片"摘出"，放到一个极大临时位置，避免影响重排
-    conn.execute(
-        "UPDATE cards SET position = 9999999 WHERE id = ?", (cid,)
-    )
-
-    # 2) 把目标列从指定位置开始的卡片整体后移一位
-    conn.execute(
-        """
-        UPDATE cards SET position = position + 1
-        WHERE column_id = ? AND archived = 0 AND position >= ? AND id <> ?
-        """,
-        (new_col, new_pos, cid),
-    )
-
-    # 3) 放置被拖卡片到目标列的目标位置
-    conn.execute(
-        "UPDATE cards SET column_id = ?, position = ?, updated_at = ? WHERE id = ?",
-        (new_col, new_pos, now_iso(), cid),
-    )
-
-    conn.commit()
-
-    # 4) 整理两列的 position，使其连续（0,1,2,...），避免长期使用后出现空洞
-    _reorder_positions(conn, old_col)
-    if old_col != new_col:
-        _reorder_positions(conn, new_col)
-    conn.commit()
-    return get_card(conn, cid)
-
-
-def _reorder_positions(conn, column_id):
-    rows = conn.execute(
-        "SELECT id FROM cards WHERE column_id = ? AND archived = 0 ORDER BY position ASC, id ASC",
-        (column_id,),
-    ).fetchall()
-    for idx, r in enumerate(rows):
-        conn.execute("UPDATE cards SET position = ? WHERE id = ?", (idx, r["id"]))
-
-
-def archive_card(conn, cid):
-    """归档卡片（软删除），保留历史。"""
-    row = conn.execute("SELECT * FROM cards WHERE id = ?", (cid,)).fetchone()
-    if row is None:
-        raise ApiError("卡片不存在", 404)
-    conn.execute(
-        "UPDATE cards SET archived = 1, updated_at = ? WHERE id = ?",
-        (now_iso(), cid),
-    )
-    conn.commit()
-    _reorder_positions(conn, row["column_id"])
-    conn.commit()
-    return {"ok": True}
-
-
-def restore_card(conn, cid):
-    """从归档恢复卡片到原列。"""
-    row = conn.execute("SELECT * FROM cards WHERE id = ?", (cid,)).fetchone()
-    if row is None:
-        raise ApiError("卡片不存在", 404)
-    # 若原列已被删除，恢复到"第一列"
-    target_col = row["column_id"]
-    if conn.execute("SELECT 1 FROM columns WHERE id = ?", (target_col,)).fetchone() is None:
-        first = conn.execute(
-            "SELECT id FROM columns ORDER BY position ASC, id ASC LIMIT 1"
-        ).fetchone()
-        if first is None:
-            raise ApiError("没有可用列，请先新建列")
-        target_col = first["id"]
-
-    # 放到目标列末尾
-    maxrow = conn.execute(
-        "SELECT MAX(position) AS m FROM cards WHERE column_id = ? AND archived = 0",
-        (target_col,),
-    ).fetchone()
-    pos = (maxrow["m"] or -1) + 1
-    conn.execute(
-        "UPDATE cards SET archived = 0, column_id = ?, position = ?, updated_at = ? WHERE id = ?",
-        (target_col, pos, now_iso(), cid),
-    )
-    conn.commit()
-    return get_card(conn, cid)
-
-
-def search_cards(conn, q=None, date_from=None, date_to=None, priority=None, include_active=False):
-    """搜索（默认只搜归档历史，可 include_active 也搜活跃卡片）。
-
-    搜索范围：标题、描述、标签全文 LIKE 匹配 + 可选日期/优先级过滤。
-    """
-    sql = "SELECT * FROM cards WHERE 1=1"
-    params = []
-
-    if include_active:
-        # 全部
-        pass
-    else:
-        sql += " AND archived = 1"
-
-    if q:
-        sql += " AND (title LIKE ? OR description LIKE ? OR labels LIKE ?)"
-        kw = f"%{q}%"
-        params.extend([kw, kw, kw])
-
-    if date_from:
-        # 按截止日期过滤；due_date 可能是 "YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM"，
-        # 取前 10 位日期部分比较，保证时间格式兼容
-        sql += " AND substr(due_date,1,10) >= ?"
-        params.append(date_from)
-
-    if date_to:
-        sql += " AND substr(due_date,1,10) <= ?"
-        params.append(date_to)
-
-    if priority and priority in VALID_PRIORITY:
-        sql += " AND priority = ?"
-        params.append(priority)
-
-    sql += " ORDER BY updated_at DESC, id DESC"
-    rows = conn.execute(sql, params).fetchall()
-    return [row_to_card(r) for r in rows]
-
-
-def export_data(conn):
-    """导出全部数据为 JSON 结构。"""
-    columns = list_columns(conn)
-    cards_active = list_cards(conn, archived=0)
-    cards_archived = list_cards(conn, archived=1)
+def normalize_card_fields(data):
+    require_object(data)
     return {
-        "exported_at": now_iso(),
-        "columns": columns,
-        "cards": cards_active + cards_archived,
+        "title": require_string(data.get("title"), "title", 1, 300),
+        "description": sanitize_description(data.get("description", "")),
+        "labels": require_string(data.get("labels", ""), "labels", 0, 2000),
+        "due_date": validate_due_date(data.get("due_date", "")),
+        "priority": validate_priority(data.get("priority", "medium")),
     }
 
 
-# ---------------------------------------------------------------------------
-# 请求分发
-# ---------------------------------------------------------------------------
-class Handler(BaseHTTPRequestHandler):
-    server_version = "KanbanServer/1.0"
+def _table_exists(conn, name):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
-    # ----- 日志：精简 -----
-    def log_message(self, fmt, *args):
-        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
-    # ----- 通用工具 -----
-    def _send_json(self, obj, status=200):
-        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+def _column_exists(conn, table, name):
+    return any(row["name"] == name for row in conn.execute("PRAGMA table_info(%s)" % table))
 
-    def _send_text(self, text, status=200, content_type="text/plain; charset=utf-8"):
-        body = text.encode("utf-8") if isinstance(text, str) else text
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def _read_json_body(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        if length == 0:
-            return {}
-        raw = self.rfile.read(length)
+def create_backup(prefix="auto", required=True):
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    final_path = os.path.join(BACKUP_DIR, "kanban-%s-%s.db" % (prefix, stamp))
+    fd, temp_path = tempfile.mkstemp(prefix=".kanban-", suffix=".tmp", dir=BACKUP_DIR)
+    os.close(fd)
+    try:
+        source, target = get_conn(), sqlite3.connect(temp_path)
         try:
-            return json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            raise ApiError("请求体不是有效的 JSON")
+            source.backup(target)
+            if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RuntimeError("备份完整性检查失败")
+        finally:
+            target.close()
+            source.close()
+        os.replace(temp_path, final_path)
+        return final_path
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        if required:
+            raise
+        return None
+
+
+def maybe_daily_backup():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    files = [os.path.join(BACKUP_DIR, n) for n in os.listdir(BACKUP_DIR)
+             if n.startswith("kanban-auto-") and n.endswith(".db")]
+    if files and datetime.now().timestamp() - max(os.path.getmtime(p) for p in files) < 86400:
+        return
+    if create_backup("auto", required=False):
+        files = sorted((os.path.join(BACKUP_DIR, n) for n in os.listdir(BACKUP_DIR)
+                        if n.startswith("kanban-auto-") and n.endswith(".db")),
+                       key=os.path.getmtime, reverse=True)
+        for path in files[10:]:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def init_db():
+    conn = get_conn()
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        if not _table_exists(conn, "columns"):
+            with transaction(conn):
+                conn.execute("CREATE TABLE columns (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,position INTEGER NOT NULL DEFAULT 0,deleted_at TEXT,version INTEGER NOT NULL DEFAULT 1)")
+                conn.execute("""CREATE TABLE cards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,column_id INTEGER NOT NULL,title TEXT NOT NULL,
+                    description TEXT DEFAULT '',labels TEXT DEFAULT '',due_date TEXT DEFAULT '',
+                    priority TEXT NOT NULL DEFAULT 'medium',position INTEGER NOT NULL DEFAULT 0,
+                    archived INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (column_id) REFERENCES columns(id) ON DELETE CASCADE)""")
+                conn.execute("CREATE TABLE board_state (id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL)")
+                conn.execute("INSERT INTO board_state VALUES (1,1,?)", (now_iso(),))
+                conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
+                conn.execute("PRAGMA user_version = 2")
+        else:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError("数据库版本高于当前程序支持版本")
+            if version < SCHEMA_VERSION:
+                create_backup("pre-migration")
+            if version < 1:
+                with transaction(conn):
+                    if not _column_exists(conn, "columns", "deleted_at"):
+                        conn.execute("ALTER TABLE columns ADD COLUMN deleted_at TEXT")
+                    if not _column_exists(conn, "columns", "version"):
+                        conn.execute("ALTER TABLE columns ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+                    if not _column_exists(conn, "cards", "version"):
+                        conn.execute("ALTER TABLE cards ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_columns_active_position ON columns(deleted_at,position,id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_active_position ON cards(archived,column_id,position,id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_archived_updated ON cards(archived,updated_at,id)")
+                    conn.execute("PRAGMA user_version = 1")
+                version = 1
+            if version < 2:
+                with transaction(conn):
+                    conn.execute("CREATE TABLE IF NOT EXISTS board_state (id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL)")
+                    conn.execute("INSERT OR IGNORE INTO board_state VALUES (1,1,?)", (now_iso(),))
+                    conn.execute("PRAGMA user_version = 2")
+        if conn.execute("SELECT COUNT(*) FROM columns WHERE deleted_at IS NULL").fetchone()[0] == 0:
+            with transaction(conn):
+                conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
+                bump_revision(conn)
+        if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("数据库完整性检查失败")
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("数据库外键检查失败")
+    finally:
+        conn.close()
+    maybe_daily_backup()
+
+
+def board_revision(conn):
+    return conn.execute("SELECT revision FROM board_state WHERE id=1").fetchone()[0]
+
+
+def bump_revision(conn):
+    conn.execute("UPDATE board_state SET revision=revision+1,updated_at=? WHERE id=1", (now_iso(),))
+    return board_revision(conn)
+
+
+def check_revision(conn, expected):
+    if expected is None:
+        return
+    require_int(expected, "expected_board_revision", 1)
+    actual = board_revision(conn)
+    if expected != actual:
+        raise ApiError("看板已发生变化，请刷新后重试", 409, "BOARD_REVISION_CONFLICT", {"expected": expected, "actual": actual})
+
+
+def check_version(row, expected):
+    if expected is None:
+        return
+    require_int(expected, "expected_version", 1)
+    if expected != row["version"]:
+        raise ApiError("内容已被其他操作修改，请刷新后重试", 409, "VERSION_CONFLICT", {"expected": expected, "actual": row["version"]})
+
+
+def row_to_column(row):
+    return {"id": row["id"], "name": row["name"], "position": row["position"], "deleted_at": row["deleted_at"], "version": row["version"]}
+
+
+def row_to_card(row):
+    result = {key: row[key] for key in ("id", "column_id", "title", "description", "labels", "due_date", "priority", "position", "archived", "created_at", "updated_at", "version")}
+    if "column_name" in row.keys():
+        result.update(column_name=row["column_name"], column_deleted=bool(row["column_deleted"]))
+        if "restore_column_id" in row.keys():
+            result["restore_column_id"] = row["restore_column_id"]
+    return result
+
+
+def list_columns(conn, include_deleted=False):
+    sql = "SELECT * FROM columns" + ("" if include_deleted else " WHERE deleted_at IS NULL") + " ORDER BY position,id"
+    return [row_to_column(r) for r in conn.execute(sql)]
+
+
+def list_cards(conn, column_id=None, archived=0):
+    sql, params = "SELECT * FROM cards WHERE archived=?", [archived]
+    if column_id is not None:
+        sql += " AND column_id=?"
+        params.append(column_id)
+    return [row_to_card(r) for r in conn.execute(sql + " ORDER BY position,id", params)]
+
+
+def get_card(conn, cid):
+    row = conn.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+    if row is None:
+        raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
+    return row_to_card(row)
+
+
+def get_board(conn):
+    conn.execute("BEGIN")
+    try:
+        result = {"schema_version": SCHEMA_VERSION, "revision": board_revision(conn), "columns": list_columns(conn), "cards": list_cards(conn)}
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def active_column(conn, cid):
+    row = conn.execute("SELECT * FROM columns WHERE id=? AND deleted_at IS NULL", (cid,)).fetchone()
+    if row is None:
+        raise ApiError("列不存在或已删除", 404, "COLUMN_NOT_FOUND")
+    return row
+
+
+def create_column(conn, data):
+    name = require_string(require_object(data).get("name"), "name", 1, 100)
+    with transaction(conn):
+        check_revision(conn, data.get("expected_board_revision"))
+        pos = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM columns WHERE deleted_at IS NULL").fetchone()[0]
+        cur = conn.execute("INSERT INTO columns (name,position) VALUES (?,?)", (name, pos))
+        revision = bump_revision(conn)
+    return {"column": row_to_column(conn.execute("SELECT * FROM columns WHERE id=?", (cur.lastrowid,)).fetchone()), "revision": revision}
+
+
+def update_column(conn, cid, data):
+    name = require_string(require_object(data).get("name"), "name", 1, 100)
+    with transaction(conn):
+        row = active_column(conn, cid)
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        conn.execute("UPDATE columns SET name=?,version=version+1 WHERE id=?", (name, cid)); revision = bump_revision(conn)
+    return {"column": row_to_column(conn.execute("SELECT * FROM columns WHERE id=?", (cid,)).fetchone()), "revision": revision}
+
+
+def _active_card_ids(conn, column_id, exclude=None):
+    return [r["id"] for r in conn.execute("SELECT id FROM cards WHERE column_id=? AND archived=0 ORDER BY position,id", (column_id,)) if r["id"] != exclude]
+
+
+def _rewrite_positions(conn, column_id, ids):
+    for index, card_id in enumerate(ids):
+        conn.execute("UPDATE cards SET position=? WHERE id=?", (index, card_id))
+
+
+def delete_column(conn, cid, data=None):
+    data = require_object(data or {})
+    with transaction(conn):
+        row = active_column(conn, cid)
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        if conn.execute("SELECT COUNT(*) FROM columns WHERE deleted_at IS NULL").fetchone()[0] <= 1:
+            raise ApiError("不能删除最后一个列", 409, "LAST_ACTIVE_COLUMN")
+        ts = now_iso()
+        count = conn.execute("SELECT COUNT(*) FROM cards WHERE column_id=? AND archived=0", (cid,)).fetchone()[0]
+        conn.execute("UPDATE cards SET archived=1,updated_at=?,version=version+1 WHERE column_id=? AND archived=0", (ts, cid))
+        conn.execute("UPDATE columns SET deleted_at=?,version=version+1 WHERE id=?", (ts, cid))
+        for index, col in enumerate(conn.execute("SELECT id FROM columns WHERE deleted_at IS NULL ORDER BY position,id")):
+            conn.execute("UPDATE columns SET position=? WHERE id=?", (index, col["id"]))
+        revision = bump_revision(conn)
+    return {"ok": True, "archived_card_count": count, "revision": revision}
+
+
+def reorder_columns(conn, data):
+    ids = require_object(data).get("ids")
+    if not isinstance(ids, list) or not ids:
+        fail("ids 必须是非空数组", field="ids")
+    for value in ids:
+        require_int(value, "ids", 1)
+    if len(ids) != len(set(ids)):
+        fail("列 id 不能重复", field="ids")
+    with transaction(conn):
+        check_revision(conn, data.get("expected_board_revision"))
+        active_ids = [r["id"] for r in conn.execute("SELECT id FROM columns WHERE deleted_at IS NULL ORDER BY position,id")]
+        if set(ids) != set(active_ids) or len(ids) != len(active_ids):
+            fail("必须提交全部活跃列的完整顺序", field="ids")
+        for index, cid in enumerate(ids):
+            conn.execute("UPDATE columns SET position=?,version=version+1 WHERE id=?", (index, cid))
+        revision = bump_revision(conn)
+    return {"columns": list_columns(conn), "revision": revision}
+
+
+def create_card(conn, data):
+    fields = normalize_card_fields(data); column_id = require_int(data.get("column_id"), "column_id", 1)
+    with transaction(conn):
+        check_revision(conn, data.get("expected_board_revision")); active_column(conn, column_id)
+        position, ts = len(_active_card_ids(conn, column_id)), now_iso()
+        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at)
+                            VALUES (?,?,?,?,?,?,?,0,?,?)""", (column_id, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], position, ts, ts))
+        revision = bump_revision(conn)
+    return {"card": get_card(conn, cur.lastrowid), "revision": revision}
+
+
+def update_card(conn, cid, data):
+    fields = normalize_card_fields(data)
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0", (cid,)).fetchone()
+        if row is None: raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        conn.execute("UPDATE cards SET title=?,description=?,labels=?,due_date=?,priority=?,updated_at=?,version=version+1 WHERE id=?",
+                     (fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], now_iso(), cid))
+        revision = bump_revision(conn)
+    return {"card": get_card(conn, cid), "revision": revision}
+
+
+def move_card(conn, cid, data):
+    data = require_object(data); target = require_int(data.get("column_id"), "column_id", 1); position = require_int(data.get("position"), "position", 0)
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+        if row is None: raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
+        if row["archived"]: raise ApiError("归档卡片不能移动", 409, "CARD_ARCHIVED")
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision")); active_column(conn, target)
+        source = row["column_id"]; source_ids = _active_card_ids(conn, source, cid)
+        target_ids = source_ids if source == target else _active_card_ids(conn, target, cid)
+        position = min(position, len(target_ids)); target_ids.insert(position, cid)
+        _rewrite_positions(conn, source, target_ids if source == target else source_ids)
+        if source != target: _rewrite_positions(conn, target, target_ids)
+        conn.execute("UPDATE cards SET column_id=?,position=?,updated_at=?,version=version+1 WHERE id=?", (target, position, now_iso(), cid))
+        revision = bump_revision(conn)
+    return {"card": get_card(conn, cid), "revision": revision}
+
+
+def archive_card(conn, cid, data=None):
+    data = require_object(data or {})
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0", (cid,)).fetchone()
+        if row is None: raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        conn.execute("UPDATE cards SET archived=1,updated_at=?,version=version+1 WHERE id=?", (now_iso(), cid))
+        _rewrite_positions(conn, row["column_id"], _active_card_ids(conn, row["column_id"])); revision = bump_revision(conn)
+    return {"ok": True, "column_id": row["column_id"], "position": row["position"], "version": row["version"] + 1, "revision": revision}
+
+
+def restore_card(conn, cid, data=None):
+    data = require_object(data or {})
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=1", (cid,)).fetchone()
+        if row is None: raise ApiError("归档卡片不存在", 404, "CARD_NOT_FOUND")
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        target = data.get("target_column_id")
+        target_row = None
+        if target is not None:
+            target_row = conn.execute("SELECT * FROM columns WHERE id=? AND deleted_at IS NULL", (target,)).fetchone()
+        else:
+            target_row = conn.execute("SELECT * FROM columns WHERE id=? AND deleted_at IS NULL", (row["column_id"],)).fetchone()
+            if target_row is None:
+                original = conn.execute("SELECT name FROM columns WHERE id=?", (row["column_id"],)).fetchone()
+                if original is not None:
+                    target_row = conn.execute(
+                        "SELECT * FROM columns WHERE deleted_at IS NULL AND name=? ORDER BY position,id LIMIT 1",
+                        (original["name"],),
+                    ).fetchone()
+        if target_row is None: target_row = conn.execute("SELECT * FROM columns WHERE deleted_at IS NULL ORDER BY position,id LIMIT 1").fetchone()
+        if target_row is None: raise ApiError("没有可用列", 409, "NO_ACTIVE_COLUMN")
+        target = target_row["id"]; ids = _active_card_ids(conn, target, cid)
+        position = min(require_int(data.get("position", len(ids)), "position", 0), len(ids)); ids.insert(position, cid)
+        _rewrite_positions(conn, target, ids)
+        conn.execute("UPDATE cards SET archived=0,column_id=?,position=?,updated_at=?,version=version+1 WHERE id=?", (target, position, now_iso(), cid))
+        revision = bump_revision(conn)
+    return {"card": get_card(conn, cid), "revision": revision}
+
+
+def copy_card(conn, cid, data=None):
+    data = require_object(data or {})
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0", (cid,)).fetchone()
+        if row is None: raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        ids = _active_card_ids(conn, row["column_id"], cid); position = min(row["position"] + 1, len(ids)); ts = now_iso()
+        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at)
+                            VALUES (?,?,?,?,?,?,?,0,?,?)""", (row["column_id"], row["title"] + "（副本）", row["description"], row["labels"], row["due_date"], row["priority"], position, ts, ts))
+        ids.insert(position, cur.lastrowid); _rewrite_positions(conn, row["column_id"], ids); revision = bump_revision(conn)
+    return {"card": get_card(conn, cur.lastrowid), "revision": revision}
+
+
+def search_cards(conn, q="", date_from=None, date_to=None, priority=None, include_active=False):
+    if date_from: validate_due_date(date_from)
+    if date_to: validate_due_date(date_to)
+    if priority: validate_priority(priority)
+    sql = """SELECT cards.*,columns.name AS column_name,
+              CASE WHEN columns.deleted_at IS NULL THEN 0 ELSE 1 END AS column_deleted,
+              CASE WHEN columns.deleted_at IS NULL THEN columns.id ELSE
+                  (SELECT matching.id FROM columns AS matching
+                   WHERE matching.deleted_at IS NULL AND matching.name=columns.name
+                   ORDER BY matching.position,matching.id LIMIT 1)
+              END AS restore_column_id
+              FROM cards JOIN columns ON columns.id=cards.column_id WHERE 1=1"""
+    params = []
+    if not include_active: sql += " AND cards.archived=1"
+    if q: sql += " AND (cards.title LIKE ? OR cards.description LIKE ? OR cards.labels LIKE ?)"; params.extend(["%%%s%%" % q] * 3)
+    if date_from: sql += " AND substr(cards.due_date,1,10)>=?"; params.append(date_from[:10])
+    if date_to: sql += " AND substr(cards.due_date,1,10)<=?"; params.append(date_to[:10])
+    if priority: sql += " AND cards.priority=?"; params.append(priority)
+    return [row_to_card(r) for r in conn.execute(sql + " ORDER BY cards.updated_at DESC,cards.id DESC LIMIT 1000", params)]
+
+
+def export_data(conn):
+    return {"format": "kanban-export", "format_version": EXPORT_VERSION, "schema_version": SCHEMA_VERSION,
+            "board_revision": board_revision(conn), "exported_at": now_iso(), "columns": list_columns(conn, True),
+            "cards": list_cards(conn, archived=0) + list_cards(conn, archived=1)}
+
+
+def normalize_import(data):
+    data = require_object(data)
+    if data.get("format") not in (None, "kanban-export") or data.get("format_version", 1) not in (1, 2):
+        fail("不支持的导入格式或版本", code="UNSUPPORTED_IMPORT_VERSION")
+    columns, cards = data.get("columns"), data.get("cards")
+    if not isinstance(columns, list) or not isinstance(cards, list) or not columns: fail("导入文件必须包含非空 columns 和 cards 数组")
+    normalized_columns, column_ids = [], set()
+    for index, item in enumerate(columns):
+        item = require_object(item); cid = require_int(item.get("id"), "columns.id", 1)
+        if cid in column_ids: fail("列 id 重复")
+        column_ids.add(cid); version = item.get("version", 1)
+        normalized_columns.append({"id": cid, "name": require_string(item.get("name"), "name", 1, 100), "position": index,
+                                   "deleted_at": item.get("deleted_at"), "version": version if isinstance(version, int) and version > 0 else 1})
+    if not any(not c["deleted_at"] for c in normalized_columns): fail("导入文件至少需要一个活跃列")
+    normalized_cards, card_ids, per_column = [], set(), {}
+    for item in cards:
+        item = require_object(item); card_id = require_int(item.get("id"), "cards.id", 1); column_id = require_int(item.get("column_id"), "column_id", 1)
+        if card_id in card_ids: fail("卡片 id 重复")
+        if column_id not in column_ids: fail("卡片引用了不存在的列", code="INVALID_IMPORT_REFERENCE")
+        card_ids.add(card_id); fields = normalize_card_fields(item); archived = item.get("archived", 0)
+        if archived not in (0, 1, False, True): fail("archived 必须是 0 或 1")
+        version = item.get("version", 1)
+        card = {"id": card_id, "column_id": column_id, **fields, "archived": int(archived),
+                "created_at": require_string(item.get("created_at", now_iso()), "created_at", 1, 30),
+                "updated_at": require_string(item.get("updated_at", now_iso()), "updated_at", 1, 30),
+                "version": version if isinstance(version, int) and version > 0 else 1, "source_position": item.get("position", 0)}
+        normalized_cards.append(card)
+        if not card["archived"]: per_column.setdefault(column_id, []).append(card)
+    for values in per_column.values():
+        values.sort(key=lambda c: (c["source_position"] if isinstance(c["source_position"], int) else 0, c["id"]))
+        for index, card in enumerate(values): card["position"] = index
+    for card in normalized_cards: card.setdefault("position", 0); card.pop("source_position", None)
+    return {"columns": normalized_columns, "cards": normalized_cards}
+
+
+def import_preview(data):
+    normalized = normalize_import(data)
+    return {"ok": True, "columns": len(normalized["columns"]), "cards": sum(not c["archived"] for c in normalized["cards"]), "archived_cards": sum(c["archived"] for c in normalized["cards"])}
+
+
+def import_replace(conn, request):
+    request = require_object(request); normalized = normalize_import(request.get("data"))
+    with DB_MAINTENANCE_LOCK:
+        check_revision(conn, request.get("expected_board_revision")); backup = create_backup("pre-import")
+        with transaction(conn):
+            check_revision(conn, request.get("expected_board_revision")); conn.execute("DELETE FROM cards"); conn.execute("DELETE FROM columns")
+            for col in normalized["columns"]:
+                conn.execute("INSERT INTO columns (id,name,position,deleted_at,version) VALUES (?,?,?,?,?)", (col["id"], col["name"], col["position"], col["deleted_at"], col["version"]))
+            for card in normalized["cards"]:
+                conn.execute("""INSERT INTO cards (id,column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,version)
+                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (card["id"], card["column_id"], card["title"], card["description"], card["labels"], card["due_date"], card["priority"], card["position"], card["archived"], card["created_at"], card["updated_at"], card["version"]))
+            revision = bump_revision(conn)
+            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None: raise ApiError("导入数据外键检查失败", 422, "INVALID_IMPORT_REFERENCE")
+    return {"ok": True, "imported": import_preview(request.get("data")), "backup": os.path.basename(backup), "revision": revision}
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "KanbanServer/2.0"
+
+    def log_message(self, fmt, *args): sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+    def _security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:")
+
+    def _send_json(self, obj, status=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8"); self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store"); self._security_headers(); self.end_headers(); self.wfile.write(body)
+
+    def _send_error(self, error):
+        payload = {"error": {"code": error.code, "message": error.message}}
+        if error.details is not None: payload["error"]["details"] = error.details
+        self._send_json(payload, error.status)
+
+    def _send_text(self, data, status=200, content_type="text/plain; charset=utf-8"):
+        body = data.encode("utf-8") if isinstance(data, str) else data; self.send_response(status)
+        self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self._security_headers(); self.end_headers(); self.wfile.write(body)
+
+    def _read_json_body(self, maximum=MAX_JSON_BODY):
+        if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json": raise ApiError("请求必须使用 application/json", 415, "UNSUPPORTED_MEDIA_TYPE")
+        try: length = int(self.headers.get("Content-Length", "0"))
+        except ValueError: raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
+        if length <= 0: raise ApiError("请求体不能为空", 400, "INVALID_JSON")
+        if length > maximum: raise ApiError("请求体过大", 413, "PAYLOAD_TOO_LARGE")
+        try: value = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError): raise ApiError("请求体不是有效 JSON", 400, "INVALID_JSON")
+        return require_object(value)
 
     def _serve_static(self, rel_path):
-        """安全地提供静态文件。rel_path 已去掉前导 / 。"""
-        # 防目录穿越
-        rel_path = rel_path.replace("\\", "/")
-        if rel_path.startswith("/"):
-            rel_path = rel_path[1:]
+        rel_path = rel_path.replace("\\", "/").lstrip("/"); file_path = os.path.join(STATIC_DIR, "index.html") if rel_path in ("", "index.html") else os.path.normpath(os.path.join(STATIC_DIR, rel_path))
+        if os.path.commonpath((os.path.abspath(STATIC_DIR), os.path.abspath(file_path))) != os.path.abspath(STATIC_DIR): return self._send_text("Forbidden", 403)
+        if not os.path.isfile(file_path): return self._send_text("Not Found", 404)
+        ctype = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml"}.get(os.path.splitext(file_path)[1].lower(), "application/octet-stream")
+        with open(file_path, "rb") as handle: self._send_text(handle.read(), content_type=ctype)
 
-        if rel_path == "" or rel_path == "index.html":
-            file_path = os.path.join(STATIC_DIR, "index.html")
-        else:
-            # 只允许 static 目录下
-            safe = os.path.normpath(os.path.join(STATIC_DIR, rel_path))
-            if not safe.startswith(os.path.abspath(STATIC_DIR)):
-                self._send_text("Forbidden", 403)
-                return
-            file_path = safe
+    def _send_backup(self):
+        with DB_MAINTENANCE_LOCK: path = create_backup("download")
+        try:
+            filename = "kanban-backup-%s.db" % datetime.now().strftime("%Y%m%d-%H%M%S"); self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.sqlite3"); self.send_header("Content-Length", str(os.path.getsize(path))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename); self._security_headers(); self.end_headers()
+            with open(path, "rb") as handle:
+                while True:
+                    chunk = handle.read(65536)
+                    if not chunk: break
+                    self.wfile.write(chunk)
+        finally:
+            try: os.remove(path)
+            except OSError: pass
 
-        if not os.path.isfile(file_path):
-            self._send_text("Not Found", 404)
-            return
-
-        ext = os.path.splitext(file_path)[1].lower()
-        ctype = {
-            ".html": "text/html; charset=utf-8",
-            ".css": "text/css; charset=utf-8",
-            ".js": "application/javascript; charset=utf-8",
-            ".json": "application/json; charset=utf-8",
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".svg": "image/svg+xml",
-            ".ico": "image/x-icon",
-        }.get(ext, "application/octet-stream")
-
-        with open(file_path, "rb") as f:
-            data = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        self.wfile.write(data)
-
-    # ----- 路由匹配 -----
     def _route(self, method):
-        parsed = urlparse(self.path)
-        path = parsed.path
-        query = parse_qs(parsed.query)
+        parsed = urlparse(self.path); path, query = parsed.path, parse_qs(parsed.query)
+        if method == "GET" and (path in ("/", "/index.html") or path.startswith("/static/")): return self._serve_static(path[len("/static/"):] if path.startswith("/static/") else path)
+        if not path.startswith("/api/"): return self._send_text("Not Found", 404)
+        try: self._route_api(method, path, query)
+        except ApiError as error: self._send_error(error)
+        except sqlite3.OperationalError as error:
+            if "locked" in str(error).lower(): self._send_error(ApiError("数据库繁忙，请稍后重试", 409, "DATABASE_BUSY"))
+            else: self.log_error("database error: %s", error); self._send_error(ApiError("服务器内部错误", 500, "INTERNAL_ERROR"))
+        except Exception as error: self.log_error("internal error: %r", error); self._send_error(ApiError("服务器内部错误", 500, "INTERNAL_ERROR"))
 
-        # 静态文件与首页
-        if method == "GET" and (path in ("/", "/index.html") or path.startswith("/static/")):
-            rel = path[len("/static/"):] if path.startswith("/static/") else path
-            self._serve_static(rel)
-            return True
-
-        # API 路由
-        if path.startswith("/api/"):
-            try:
-                self._route_api(method, path, query)
-            except ApiError as e:
-                self._send_json({"error": e.message}, e.status)
-            except Exception as e:  # noqa: BLE001
-                self._send_json({"error": "服务器内部错误: %s" % e}, 500)
-            return True
-
-        self._send_text("Not Found", 404)
-        return True
-
-    # ----- API 分发 -----
     def _route_api(self, method, path, query):
         conn = get_conn()
         try:
-            # columns 集合
-            if path == "/api/columns" and method == "GET":
-                self._send_json(list_columns(conn))
-                return
-            if path == "/api/columns" and method == "POST":
-                data = self._read_json_body()
-                self._send_json(create_column(conn, data), 201)
-                return
-
-            # columns 批量重排
-            if path == "/api/columns/reorder" and method == "POST":
-                data = self._read_json_body()
-                ids = data.get("ids")
-                self._send_json(reorder_columns(conn, ids))
-                return
-
-            # columns 单条
-            m = re.fullmatch(r"/api/columns/(\d+)", path)
-            if m:
-                cid = int(m.group(1))
-                if method == "PUT":
-                    data = self._read_json_body()
-                    self._send_json(update_column(conn, cid, data))
-                    return
-                if method == "DELETE":
-                    self._send_json(delete_column(conn, cid))
-                    return
-
-            # cards 集合
+            if path == "/api/board" and method == "GET": return self._send_json(get_board(conn))
+            if path == "/api/columns" and method == "GET": return self._send_json(list_columns(conn))
+            if path == "/api/columns" and method == "POST": return self._send_json(create_column(conn, self._read_json_body()), 201)
+            if path == "/api/columns/reorder" and method == "POST": return self._send_json(reorder_columns(conn, self._read_json_body()))
+            match = re.fullmatch(r"/api/columns/(\d+)", path)
+            if match:
+                cid = int(match.group(1))
+                if method == "PUT": return self._send_json(update_column(conn, cid, self._read_json_body()))
+                if method == "DELETE": return self._send_json(delete_column(conn, cid, self._read_json_body() if int(self.headers.get("Content-Length", "0")) else {}))
             if path == "/api/cards" and method == "GET":
-                col = query.get("column_id", [None])[0]
-                col = int(col) if col is not None else None
-                self._send_json(list_cards(conn, column_id=col, archived=0))
-                return
-            if path == "/api/cards" and method == "POST":
-                data = self._read_json_body()
-                self._send_json(create_card(conn, data), 201)
-                return
-
-            # cards 单条
-            m = re.fullmatch(r"/api/cards/(\d+)", path)
-            if m:
-                cid = int(m.group(1))
-                if method == "GET":
-                    self._send_json(get_card(conn, cid))
-                    return
-                if method == "PUT":
-                    data = self._read_json_body()
-                    self._send_json(update_card(conn, cid, data))
-                    return
-                if method == "DELETE":
-                    self._send_json(archive_card(conn, cid))
-                    return
-
-            # cards 移动
-            m = re.fullmatch(r"/api/cards/(\d+)/move", path)
-            if m and method == "PUT":
-                cid = int(m.group(1))
-                data = self._read_json_body()
-                self._send_json(move_card(conn, cid, data))
-                return
-
-            # cards 恢复
-            m = re.fullmatch(r"/api/cards/(\d+)/restore", path)
-            if m and method == "POST":
-                cid = int(m.group(1))
-                self._send_json(restore_card(conn, cid))
-                return
-
-            # 搜索
-            if path == "/api/search" and method == "GET":
-                q = query.get("q", [""])[0]
-                date_from = query.get("from", [None])[0]
-                date_to = query.get("to", [None])[0]
-                priority = query.get("priority", [None])[0]
-                include_active = query.get("all", ["0"])[0] in ("1", "true", "True")
-                self._send_json(
-                    search_cards(
-                        conn, q=q, date_from=date_from, date_to=date_to,
-                        priority=priority, include_active=include_active,
-                    )
-                )
-                return
-
-            # 导出 JSON
+                raw = query.get("column_id", [None])[0]
+                if raw is not None and not raw.isdigit(): fail("column_id 无效", field="column_id")
+                return self._send_json(list_cards(conn, int(raw) if raw is not None else None))
+            if path == "/api/cards" and method == "POST": return self._send_json(create_card(conn, self._read_json_body()), 201)
+            match = re.fullmatch(r"/api/cards/(\d+)", path)
+            if match:
+                cid = int(match.group(1))
+                if method == "GET": return self._send_json(get_card(conn, cid))
+                if method == "PUT": return self._send_json(update_card(conn, cid, self._read_json_body()))
+                if method == "DELETE": return self._send_json(archive_card(conn, cid, self._read_json_body() if int(self.headers.get("Content-Length", "0")) else {}))
+            for suffix, action, verb in (("move", move_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST")):
+                match = re.fullmatch(r"/api/cards/(\d+)/%s" % suffix, path)
+                if match and method == verb: return self._send_json(action(conn, int(match.group(1)), self._read_json_body()))
+            if path == "/api/search" and method == "GET": return self._send_json(search_cards(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true")))
             if path == "/api/export" and method == "GET":
-                data = export_data(conn)
-                body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-                fname = "kanban-export-%s.json" % datetime.now().strftime("%Y%m%d-%H%M%S")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header(
-                    "Content-Disposition", 'attachment; filename="%s"' % fname
-                )
-                self.end_headers()
-                self.wfile.write(body)
-                return
+                body = json.dumps(export_data(conn), ensure_ascii=False, indent=2).encode("utf-8"); filename = "kanban-export-%s.json" % datetime.now().strftime("%Y%m%d-%H%M%S")
+                self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename); self._security_headers(); self.end_headers(); self.wfile.write(body); return
+            if path == "/api/backup" and method == "GET": return self._send_backup()
+            if path == "/api/import/preview" and method == "POST": return self._send_json(import_preview(self._read_json_body(MAX_IMPORT_BODY)))
+            if path == "/api/import" and method == "POST": return self._send_json(import_replace(conn, self._read_json_body(MAX_IMPORT_BODY)))
+            raise ApiError("未知的 API 路径", 404, "NOT_FOUND")
+        finally: conn.close()
 
-            # 备份 db 文件
-            if path == "/api/backup" and method == "GET":
-                # 先确保所有变更落盘
-                conn.commit()
-                conn.close()
-                with open(DB_PATH, "rb") as f:
-                    data = f.read()
-                fname = "kanban-backup-%s.db" % datetime.now().strftime("%Y%m%d-%H%M%S")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header(
-                    "Content-Disposition", 'attachment; filename="%s"' % fname
-                )
-                self.end_headers()
-                self.wfile.write(data)
-                return
-
-            self._send_json({"error": "未知的 API 路径"}, 404)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-    # ----- HTTP 方法入口 -----
-    def do_GET(self):
-        self._route("GET")
-
-    def do_POST(self):
-        self._route("POST")
-
-    def do_PUT(self):
-        self._route("PUT")
-
-    def do_DELETE(self):
-        self._route("DELETE")
-
-    def do_OPTIONS(self):
-        # 便于未来跨域扩展；当前同源不需要
-        self.send_response(204)
-        self.end_headers()
+    def do_GET(self): self._route("GET")
+    def do_POST(self): self._route("POST")
+    def do_PUT(self): self._route("PUT")
+    def do_DELETE(self): self._route("DELETE")
+    def do_OPTIONS(self): self.send_response(204); self._security_headers(); self.end_headers()
 
 
-# ---------------------------------------------------------------------------
-# 启动
-# ---------------------------------------------------------------------------
 def main():
-    init_db()
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print("=" * 60)
-    print("  看板系统已启动")
-    print("  本地访问: http://localhost:%d" % PORT)
-    print("  局域网访问: http://%s:%d" % (_get_lan_ip(), PORT))
-    print("  数据库: %s" % DB_PATH)
-    print("  按 Ctrl+C 停止")
-    print("=" * 60)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n正在停止...")
-        server.shutdown()
+    init_db(); server = ThreadingHTTPServer((HOST, PORT), Handler)
+    print("=" * 60); print("  看板系统已启动"); print("  访问地址: http://%s:%d" % (HOST, PORT))
+    if HOST not in ("127.0.0.1", "localhost", "::1"): print("  警告：服务已开放给其他设备，当前系统没有登录认证。")
+    print("  数据库: %s" % DB_PATH); print("  按 Ctrl+C 停止"); print("=" * 60)
+    try: server.serve_forever()
+    except KeyboardInterrupt: print("\n正在停止..."); server.shutdown()
 
 
-def _get_lan_ip():
-    """获取本机局域网 IP，仅用于提示。"""
-    import socket
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return HOST
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

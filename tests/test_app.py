@@ -1,0 +1,168 @@
+import os
+import sqlite3
+import tempfile
+import unittest
+from unittest import mock
+
+import app
+
+
+class DatabaseTestCase(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp.name, "test.db")
+        self.backup_dir = os.path.join(self.temp.name, "backups")
+        self.patches = [
+            mock.patch.object(app, "DB_PATH", self.db_path),
+            mock.patch.object(app, "BACKUP_DIR", self.backup_dir),
+        ]
+        for patch in self.patches:
+            patch.start()
+        app.init_db()
+        self.conn = app.get_conn()
+
+    def tearDown(self):
+        self.conn.close()
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.temp.cleanup()
+
+    def create_card(self, column_id, title):
+        return app.create_card(self.conn, {
+            "column_id": column_id,
+            "title": title,
+            "description": "",
+            "labels": "",
+            "due_date": "",
+            "priority": "medium",
+        })["card"]
+
+
+class MigrationTests(DatabaseTestCase):
+    def test_latest_schema_is_created(self):
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(len(app.list_columns(self.conn)), 3)
+        self.assertEqual(app.get_board(self.conn)["schema_version"], 2)
+
+
+class CardMovementTests(DatabaseTestCase):
+    def test_same_column_move_down(self):
+        column = app.list_columns(self.conn)[0]
+        cards = [self.create_card(column["id"], name) for name in ("A", "B", "C", "D")]
+        revision = app.board_revision(self.conn)
+        app.move_card(self.conn, cards[1]["id"], {
+            "column_id": column["id"], "position": 2,
+            "expected_version": cards[1]["version"],
+            "expected_board_revision": revision,
+        })
+        self.assertEqual([card["title"] for card in app.list_cards(self.conn, column["id"])], ["A", "C", "B", "D"])
+
+    def test_cross_column_positions_are_contiguous(self):
+        first, second = app.list_columns(self.conn)[:2]
+        cards = [self.create_card(first["id"], name) for name in ("A", "B", "C")]
+        app.move_card(self.conn, cards[1]["id"], {
+            "column_id": second["id"], "position": 0,
+            "expected_version": cards[1]["version"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })
+        self.assertEqual([card["position"] for card in app.list_cards(self.conn, first["id"])], [0, 1])
+        self.assertEqual([card["title"] for card in app.list_cards(self.conn, second["id"])], ["B"])
+
+
+class ColumnDeletionTests(DatabaseTestCase):
+    def test_delete_column_preserves_archived_card(self):
+        columns = app.list_columns(self.conn)
+        card = self.create_card(columns[0]["id"], "保留我")
+        app.delete_column(self.conn, columns[0]["id"], {
+            "expected_version": columns[0]["version"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })
+        stored = app.get_card(self.conn, card["id"])
+        self.assertEqual(stored["archived"], 1)
+        result = app.search_cards(self.conn, q="保留我")
+        self.assertEqual(result[0]["column_deleted"], True)
+        restored = app.restore_card(self.conn, card["id"], {
+            "expected_version": stored["version"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })["card"]
+        self.assertNotEqual(restored["column_id"], columns[0]["id"])
+
+    def test_restore_matches_recreated_column_by_name(self):
+        columns = app.list_columns(self.conn)
+        original = columns[1]
+        card = self.create_card(original["id"], "回到进行中")
+        app.delete_column(self.conn, original["id"], {
+            "expected_version": original["version"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })
+        recreated = app.create_column(self.conn, {
+            "name": original["name"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })["column"]
+        archived = app.get_card(self.conn, card["id"])
+        result = app.search_cards(self.conn, q="回到进行中")[0]
+        self.assertEqual(result["restore_column_id"], recreated["id"])
+        restored = app.restore_card(self.conn, card["id"], {
+            "expected_version": archived["version"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })["card"]
+        self.assertEqual(restored["column_id"], recreated["id"])
+
+    def test_last_column_cannot_be_deleted(self):
+        columns = app.list_columns(self.conn)
+        for column in columns[:-1]:
+            app.delete_column(self.conn, column["id"])
+        with self.assertRaises(app.ApiError) as raised:
+            app.delete_column(self.conn, columns[-1]["id"])
+        self.assertEqual(raised.exception.code, "LAST_ACTIVE_COLUMN")
+
+
+class ValidationTests(DatabaseTestCase):
+    def test_invalid_priority_is_rejected(self):
+        column = app.list_columns(self.conn)[0]
+        with self.assertRaises(app.ApiError):
+            app.create_card(self.conn, {"column_id": column["id"], "title": "x", "description": "", "labels": "", "due_date": "", "priority": "urgent"})
+
+    def test_description_is_sanitized(self):
+        column = app.list_columns(self.conn)[0]
+        card = app.create_card(self.conn, {"column_id": column["id"], "title": "x", "description": '<script>alert(1)</script><p onclick="x">安全</p>', "labels": "", "due_date": "", "priority": "medium"})["card"]
+        self.assertNotIn("script", card["description"])
+        self.assertNotIn("onclick", card["description"])
+        self.assertEqual(card["description"], "<p>安全</p>")
+
+
+class ConcurrencyTests(DatabaseTestCase):
+    def test_stale_version_is_rejected(self):
+        column = app.list_columns(self.conn)[0]
+        card = self.create_card(column["id"], "旧标题")
+        payload = {"title": "新标题", "description": "", "labels": "", "due_date": "", "priority": "medium", "expected_version": card["version"], "expected_board_revision": app.board_revision(self.conn)}
+        app.update_card(self.conn, card["id"], payload)
+        payload["expected_board_revision"] = app.board_revision(self.conn)
+        with self.assertRaises(app.ApiError) as raised:
+            app.update_card(self.conn, card["id"], payload)
+        self.assertEqual(raised.exception.code, "VERSION_CONFLICT")
+
+
+class BackupImportTests(DatabaseTestCase):
+    def test_backup_is_valid_database(self):
+        path = app.create_backup("test")
+        backup = sqlite3.connect(path)
+        try:
+            self.assertEqual(backup.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            self.assertEqual(backup.execute("SELECT COUNT(*) FROM columns").fetchone()[0], 3)
+        finally:
+            backup.close()
+
+    def test_export_import_round_trip(self):
+        column = app.list_columns(self.conn)[0]
+        self.create_card(column["id"], "往返")
+        exported = app.export_data(self.conn)
+        preview = app.import_preview(exported)
+        self.assertEqual(preview["cards"], 1)
+        result = app.import_replace(self.conn, {"data": exported, "expected_board_revision": app.board_revision(self.conn)})
+        self.assertTrue(result["ok"])
+        self.assertEqual(app.list_cards(self.conn)[0]["title"], "往返")
+
+
+if __name__ == "__main__":
+    unittest.main()

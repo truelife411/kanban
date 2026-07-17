@@ -17,16 +17,23 @@
             <button id="btn-history" class="nav-btn" onclick="showView('history')">历史</button>
         </div>
         <div class="topbar-right">
-            <button class="icon-btn" title="刷新" onclick="refresh()">🔄</button>
+            <button class="icon-btn" title="导入JSON" onclick="selectImportFile()">⬆ 导入</button>
             <button class="icon-btn" title="导出JSON" onclick="exportJson()">⬇ 导出</button>
             <button class="icon-btn" title="备份数据库" onclick="backupDb()">💾 备份</button>
             <button class="icon-btn add-btn" title="新增列" onclick="addColumn()">+ 新列</button>
+            <input id="import-file" type="file" accept="application/json,.json" hidden>
         </div>
     </header>
 
     <!-- ============ 看板视图 ============ -->
     <main id="view-board" class="board-view">
-        <div id="board" class="board">
+        <div class="board-filters" aria-label="看板筛选">
+            <div id="due-filters" class="filter-group" aria-label="日期范围"></div>
+            <div id="priority-filters" class="filter-group priority-filter-group" aria-label="优先级"></div>
+            <div id="label-filters" class="filter-group label-filter-group" aria-label="标签"></div>
+            <button id="clear-filters" class="filter-clear" type="button" onclick="clearBoardFilters()" hidden>清除筛选</button>
+        </div>
+        <div id="board" class="board" aria-label="看板">
             <!-- 列由 JS 渲染 -->
         </div>
     </main>
@@ -55,18 +62,18 @@
 
     <!-- ============ 卡片编辑弹窗 ============ -->
     <div id="card-modal" class="modal-overlay" hidden>
-        <div class="modal">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title-text">
             <div class="modal-header">
                 <h2 id="modal-title-text">编辑卡片</h2>
-                <button class="icon-btn danger" title="删除(归档)" onclick="deleteCurrentCard()">🗑</button>
-                <button class="icon-btn" title="关闭" onclick="closeCardModal()">✕</button>
+                <button class="icon-btn danger" aria-label="归档卡片" title="归档卡片" onclick="deleteCurrentCard()">🗑</button>
+                <button class="icon-btn" aria-label="关闭卡片编辑" title="关闭" onclick="closeCardModal()">✕</button>
             </div>
             <div class="modal-body">
                 <label>标题 <span class="req">*</span>
                     <input type="text" id="card-title" placeholder="卡片标题">
                 </label>
                 <div class="field">
-                    <span class="field-label">描述</span>
+                    <span class="field-label" id="card-description-label">描述</span>
                     <div class="editor-toolbar" id="editor-toolbar">
                         <div class="tb-group" role="group" aria-label="列表和缩进">
                             <button type="button" title="项目符号" aria-label="项目符号" data-cmd="insertUnorderedList">
@@ -98,7 +105,7 @@
                             </button>
                         </div>
                     </div>
-                    <div id="card-description" class="editor" contenteditable="true" data-placeholder="详细描述…"></div>
+                    <div id="card-description" class="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="card-description-label" data-placeholder="详细描述…"></div>
                 </div>
                 <label><span class="label-inline">标签 <small>(逗号分隔)</small></span>
                     <input type="text" id="card-labels" placeholder="如: bug, 紧急">
@@ -109,6 +116,18 @@
                         <input type="time" id="card-due-time" placeholder="时间">
                     </div>
                 </label>
+                <label>所在列
+                    <select id="card-column"></select>
+                </label>
+                <div class="field" id="card-move-controls" hidden>
+                    <span class="field-label">调整位置</span>
+                    <div class="move-controls">
+                        <button type="button" class="ghost" onclick="moveCurrentCard('top')">移到顶部</button>
+                        <button type="button" class="ghost" onclick="moveCurrentCard('up')">上移</button>
+                        <button type="button" class="ghost" onclick="moveCurrentCard('down')">下移</button>
+                        <button type="button" class="ghost" onclick="moveCurrentCard('bottom')">移到底部</button>
+                    </div>
+                </div>
                 <label>优先级
                     <select id="card-priority">
                         <option value="high">高</option>
@@ -129,10 +148,10 @@
 
     <!-- ============ 新增列弹窗 ============ -->
     <div id="column-modal" class="modal-overlay" hidden>
-        <div class="modal small">
+        <div class="modal small" role="dialog" aria-modal="true" aria-labelledby="column-modal-title">
             <div class="modal-header">
-                <h2>新增列</h2>
-                <button class="icon-btn" onclick="closeColumnModal()">✕</button>
+                <h2 id="column-modal-title">新增列</h2>
+                <button class="icon-btn" aria-label="关闭新增列" onclick="closeColumnModal()">✕</button>
             </div>
             <div class="modal-body">
                 <label>列名 <span class="req">*</span>
@@ -150,7 +169,8 @@
     </div>
 
     <!-- Toast 提示 -->
-    <div id="toast" class="toast" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+    <div id="live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
     <script src="/static/app.js"></script>
 </body>
