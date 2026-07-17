@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,7 +21,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 HOST = os.environ.get("KANBAN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("KANBAN_PORT", "8000"))
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXPORT_VERSION = 2
 MAX_JSON_BODY = 1024 * 1024
 MAX_IMPORT_BODY = 10 * 1024 * 1024
@@ -223,12 +223,13 @@ def init_db():
                     description TEXT DEFAULT '',labels TEXT DEFAULT '',due_date TEXT DEFAULT '',
                     priority TEXT NOT NULL DEFAULT 'medium',position INTEGER NOT NULL DEFAULT 0,
                     archived INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+                    completed_at TEXT,archived_at TEXT,archive_reason TEXT,
                     version INTEGER NOT NULL DEFAULT 1,
                     FOREIGN KEY (column_id) REFERENCES columns(id) ON DELETE CASCADE)""")
                 conn.execute("CREATE TABLE board_state (id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL)")
                 conn.execute("INSERT INTO board_state VALUES (1,1,?)", (now_iso(),))
                 conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
-                conn.execute("PRAGMA user_version = 2")
+                conn.execute("PRAGMA user_version = 3")
         else:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -253,6 +254,22 @@ def init_db():
                     conn.execute("CREATE TABLE IF NOT EXISTS board_state (id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL)")
                     conn.execute("INSERT OR IGNORE INTO board_state VALUES (1,1,?)", (now_iso(),))
                     conn.execute("PRAGMA user_version = 2")
+                version = 2
+            if version < 3:
+                with transaction(conn):
+                    if not _column_exists(conn, "cards", "completed_at"):
+                        conn.execute("ALTER TABLE cards ADD COLUMN completed_at TEXT")
+                    if not _column_exists(conn, "cards", "archived_at"):
+                        conn.execute("ALTER TABLE cards ADD COLUMN archived_at TEXT")
+                    if not _column_exists(conn, "cards", "archive_reason"):
+                        conn.execute("ALTER TABLE cards ADD COLUMN archive_reason TEXT")
+                    ts = now_iso()
+                    conn.execute("""UPDATE cards SET completed_at=? WHERE archived=0 AND column_id IN
+                                  (SELECT id FROM columns WHERE deleted_at IS NULL AND trim(name)='已完成')""", (ts,))
+                    conn.execute("UPDATE cards SET archived_at=updated_at,archive_reason='legacy' WHERE archived=1")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_auto_archive ON cards(archived,column_id,completed_at)")
+                    conn.execute("PRAGMA user_version = 3")
+                version = 3
         if conn.execute("SELECT COUNT(*) FROM columns WHERE deleted_at IS NULL").fetchone()[0] == 0:
             with transaction(conn):
                 conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
@@ -297,7 +314,7 @@ def row_to_column(row):
 
 
 def row_to_card(row):
-    result = {key: row[key] for key in ("id", "column_id", "title", "description", "labels", "due_date", "priority", "position", "archived", "created_at", "updated_at", "version")}
+    result = {key: row[key] for key in ("id", "column_id", "title", "description", "labels", "due_date", "priority", "position", "archived", "created_at", "updated_at", "completed_at", "archived_at", "archive_reason", "version")}
     if "column_name" in row.keys():
         result.update(column_name=row["column_name"], column_deleted=bool(row["column_deleted"]))
         if "restore_column_id" in row.keys():
@@ -325,7 +342,31 @@ def get_card(conn, cid):
     return row_to_card(row)
 
 
+def is_completed_column(row):
+    return row is not None and row["name"].strip() == "已完成" and row["deleted_at"] is None
+
+
+def auto_archive_completed_cards(conn, now=None):
+    now = now or datetime.now()
+    cutoff = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    completed = conn.execute("SELECT * FROM columns WHERE deleted_at IS NULL AND trim(name)='已完成' LIMIT 1").fetchone()
+    if completed is None:
+        return 0
+    rows = conn.execute("SELECT id FROM cards WHERE column_id=? AND archived=0 AND completed_at IS NOT NULL AND completed_at<=?", (completed["id"], cutoff)).fetchall()
+    if not rows:
+        return 0
+    ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    with transaction(conn):
+        ids = [row["id"] for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='auto_completed',updated_at=?,version=version+1 WHERE id IN (%s)" % placeholders, [ts, ts] + ids)
+        _rewrite_positions(conn, completed["id"], _active_card_ids(conn, completed["id"]))
+        bump_revision(conn)
+    return len(rows)
+
+
 def get_board(conn):
+    auto_archive_completed_cards(conn)
     conn.execute("BEGIN")
     try:
         result = {"schema_version": SCHEMA_VERSION, "revision": board_revision(conn), "columns": list_columns(conn), "cards": list_cards(conn)}
@@ -343,10 +384,21 @@ def active_column(conn, cid):
     return row
 
 
+def ensure_unique_column_name(conn, name, exclude_id=None):
+    sql = "SELECT 1 FROM columns WHERE deleted_at IS NULL AND name = ? COLLATE NOCASE"
+    params = [name]
+    if exclude_id is not None:
+        sql += " AND id <> ?"
+        params.append(exclude_id)
+    if conn.execute(sql, params).fetchone() is not None:
+        raise ApiError("列名已存在，请使用其他名称", 409, "COLUMN_NAME_EXISTS", {"field": "name"})
+
+
 def create_column(conn, data):
     name = require_string(require_object(data).get("name"), "name", 1, 100)
     with transaction(conn):
         check_revision(conn, data.get("expected_board_revision"))
+        ensure_unique_column_name(conn, name)
         pos = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM columns WHERE deleted_at IS NULL").fetchone()[0]
         cur = conn.execute("INSERT INTO columns (name,position) VALUES (?,?)", (name, pos))
         revision = bump_revision(conn)
@@ -358,7 +410,15 @@ def update_column(conn, cid, data):
     with transaction(conn):
         row = active_column(conn, cid)
         check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
-        conn.execute("UPDATE columns SET name=?,version=version+1 WHERE id=?", (name, cid)); revision = bump_revision(conn)
+        ensure_unique_column_name(conn, name, cid)
+        was_completed = is_completed_column(row)
+        becomes_completed = name.strip() == "已完成"
+        conn.execute("UPDATE columns SET name=?,version=version+1 WHERE id=?", (name, cid))
+        if becomes_completed and not was_completed:
+            conn.execute("UPDATE cards SET completed_at=? WHERE column_id=? AND archived=0", (now_iso(), cid))
+        elif was_completed and not becomes_completed:
+            conn.execute("UPDATE cards SET completed_at=NULL WHERE column_id=? AND archived=0", (cid,))
+        revision = bump_revision(conn)
     return {"column": row_to_column(conn.execute("SELECT * FROM columns WHERE id=?", (cid,)).fetchone()), "revision": revision}
 
 
@@ -380,7 +440,7 @@ def delete_column(conn, cid, data=None):
             raise ApiError("不能删除最后一个列", 409, "LAST_ACTIVE_COLUMN")
         ts = now_iso()
         count = conn.execute("SELECT COUNT(*) FROM cards WHERE column_id=? AND archived=0", (cid,)).fetchone()[0]
-        conn.execute("UPDATE cards SET archived=1,updated_at=?,version=version+1 WHERE column_id=? AND archived=0", (ts, cid))
+        conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='column_deleted',updated_at=?,version=version+1 WHERE column_id=? AND archived=0", (ts, ts, cid))
         conn.execute("UPDATE columns SET deleted_at=?,version=version+1 WHERE id=?", (ts, cid))
         for index, col in enumerate(conn.execute("SELECT id FROM columns WHERE deleted_at IS NULL ORDER BY position,id")):
             conn.execute("UPDATE columns SET position=? WHERE id=?", (index, col["id"]))
@@ -410,10 +470,11 @@ def reorder_columns(conn, data):
 def create_card(conn, data):
     fields = normalize_card_fields(data); column_id = require_int(data.get("column_id"), "column_id", 1)
     with transaction(conn):
-        check_revision(conn, data.get("expected_board_revision")); active_column(conn, column_id)
+        check_revision(conn, data.get("expected_board_revision")); column = active_column(conn, column_id)
         position, ts = len(_active_card_ids(conn, column_id)), now_iso()
-        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at)
-                            VALUES (?,?,?,?,?,?,?,0,?,?)""", (column_id, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], position, ts, ts))
+        completed_at = ts if is_completed_column(column) else None
+        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at)
+                            VALUES (?,?,?,?,?,?,?,0,?,?,?)""", (column_id, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], position, ts, ts, completed_at))
         revision = bump_revision(conn)
     return {"card": get_card(conn, cur.lastrowid), "revision": revision}
 
@@ -436,13 +497,17 @@ def move_card(conn, cid, data):
         row = conn.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
         if row is None: raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
         if row["archived"]: raise ApiError("归档卡片不能移动", 409, "CARD_ARCHIVED")
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision")); active_column(conn, target)
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision")); target_column = active_column(conn, target)
         source = row["column_id"]; source_ids = _active_card_ids(conn, source, cid)
         target_ids = source_ids if source == target else _active_card_ids(conn, target, cid)
         position = min(position, len(target_ids)); target_ids.insert(position, cid)
         _rewrite_positions(conn, source, target_ids if source == target else source_ids)
         if source != target: _rewrite_positions(conn, target, target_ids)
-        conn.execute("UPDATE cards SET column_id=?,position=?,updated_at=?,version=version+1 WHERE id=?", (target, position, now_iso(), cid))
+        if source == target:
+            completed_at = row["completed_at"]
+        else:
+            completed_at = now_iso() if is_completed_column(target_column) else None
+        conn.execute("UPDATE cards SET column_id=?,position=?,completed_at=?,updated_at=?,version=version+1 WHERE id=?", (target, position, completed_at, now_iso(), cid))
         revision = bump_revision(conn)
     return {"card": get_card(conn, cid), "revision": revision}
 
@@ -453,7 +518,8 @@ def archive_card(conn, cid, data=None):
         row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0", (cid,)).fetchone()
         if row is None: raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
         check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
-        conn.execute("UPDATE cards SET archived=1,updated_at=?,version=version+1 WHERE id=?", (now_iso(), cid))
+        ts = now_iso()
+        conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='manual',updated_at=?,version=version+1 WHERE id=?", (ts, ts, cid))
         _rewrite_positions(conn, row["column_id"], _active_card_ids(conn, row["column_id"])); revision = bump_revision(conn)
     return {"ok": True, "column_id": row["column_id"], "position": row["position"], "version": row["version"] + 1, "revision": revision}
 
@@ -482,7 +548,8 @@ def restore_card(conn, cid, data=None):
         target = target_row["id"]; ids = _active_card_ids(conn, target, cid)
         position = min(require_int(data.get("position", len(ids)), "position", 0), len(ids)); ids.insert(position, cid)
         _rewrite_positions(conn, target, ids)
-        conn.execute("UPDATE cards SET archived=0,column_id=?,position=?,updated_at=?,version=version+1 WHERE id=?", (target, position, now_iso(), cid))
+        completed_at = now_iso() if is_completed_column(target_row) else None
+        conn.execute("UPDATE cards SET archived=0,column_id=?,position=?,completed_at=?,archived_at=NULL,archive_reason=NULL,updated_at=?,version=version+1 WHERE id=?", (target, position, completed_at, now_iso(), cid))
         revision = bump_revision(conn)
     return {"card": get_card(conn, cid), "revision": revision}
 
@@ -552,6 +619,8 @@ def normalize_import(data):
         card = {"id": card_id, "column_id": column_id, **fields, "archived": int(archived),
                 "created_at": require_string(item.get("created_at", now_iso()), "created_at", 1, 30),
                 "updated_at": require_string(item.get("updated_at", now_iso()), "updated_at", 1, 30),
+                "completed_at": item.get("completed_at"), "archived_at": item.get("archived_at"),
+                "archive_reason": item.get("archive_reason"),
                 "version": version if isinstance(version, int) and version > 0 else 1, "source_position": item.get("position", 0)}
         normalized_cards.append(card)
         if not card["archived"]: per_column.setdefault(column_id, []).append(card)
@@ -576,8 +645,8 @@ def import_replace(conn, request):
             for col in normalized["columns"]:
                 conn.execute("INSERT INTO columns (id,name,position,deleted_at,version) VALUES (?,?,?,?,?)", (col["id"], col["name"], col["position"], col["deleted_at"], col["version"]))
             for card in normalized["cards"]:
-                conn.execute("""INSERT INTO cards (id,column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,version)
-                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (card["id"], card["column_id"], card["title"], card["description"], card["labels"], card["due_date"], card["priority"], card["position"], card["archived"], card["created_at"], card["updated_at"], card["version"]))
+                conn.execute("""INSERT INTO cards (id,column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at,archived_at,archive_reason,version)
+                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (card["id"], card["column_id"], card["title"], card["description"], card["labels"], card["due_date"], card["priority"], card["position"], card["archived"], card["created_at"], card["updated_at"], card["completed_at"], card["archived_at"], card["archive_reason"], card["version"]))
             revision = bump_revision(conn)
             if conn.execute("PRAGMA foreign_key_check").fetchone() is not None: raise ApiError("导入数据外键检查失败", 422, "INVALID_IMPORT_REFERENCE")
     return {"ok": True, "imported": import_preview(request.get("data")), "backup": os.path.basename(backup), "revision": revision}

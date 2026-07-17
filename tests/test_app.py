@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from unittest import mock
 
 import app
@@ -40,9 +41,9 @@ class DatabaseTestCase(unittest.TestCase):
 
 class MigrationTests(DatabaseTestCase):
     def test_latest_schema_is_created(self):
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 3)
         self.assertEqual(len(app.list_columns(self.conn)), 3)
-        self.assertEqual(app.get_board(self.conn)["schema_version"], 2)
+        self.assertEqual(app.get_board(self.conn)["schema_version"], 3)
 
 
 class CardMovementTests(DatabaseTestCase):
@@ -108,6 +109,21 @@ class ColumnDeletionTests(DatabaseTestCase):
         })["card"]
         self.assertEqual(restored["column_id"], recreated["id"])
 
+    def test_duplicate_active_column_names_are_rejected(self):
+        columns = app.list_columns(self.conn)
+        with self.assertRaises(app.ApiError) as created:
+            app.create_column(self.conn, {"name": columns[0]["name"]})
+        self.assertEqual(created.exception.code, "COLUMN_NAME_EXISTS")
+        with self.assertRaises(app.ApiError) as renamed:
+            app.update_column(self.conn, columns[1]["id"], {"name": columns[0]["name"]})
+        self.assertEqual(renamed.exception.code, "COLUMN_NAME_EXISTS")
+
+    def test_deleted_column_name_can_be_reused(self):
+        column = app.list_columns(self.conn)[0]
+        app.delete_column(self.conn, column["id"])
+        recreated = app.create_column(self.conn, {"name": column["name"]})["column"]
+        self.assertEqual(recreated["name"], column["name"])
+
     def test_last_column_cannot_be_deleted(self):
         columns = app.list_columns(self.conn)
         for column in columns[:-1]:
@@ -141,6 +157,61 @@ class ConcurrencyTests(DatabaseTestCase):
         with self.assertRaises(app.ApiError) as raised:
             app.update_card(self.conn, card["id"], payload)
         self.assertEqual(raised.exception.code, "VERSION_CONFLICT")
+
+
+class AutoArchiveTests(DatabaseTestCase):
+    def completed_column(self):
+        return next(column for column in app.list_columns(self.conn) if column["name"] == "已完成")
+
+    def test_entering_completed_column_starts_timer(self):
+        todo = app.list_columns(self.conn)[0]
+        completed = self.completed_column()
+        card = self.create_card(todo["id"], "完成任务")
+        moved = app.move_card(self.conn, card["id"], {
+            "column_id": completed["id"], "position": 0,
+            "expected_version": card["version"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })["card"]
+        self.assertIsNotNone(moved["completed_at"])
+        moved_again = app.move_card(self.conn, card["id"], {
+            "column_id": completed["id"], "position": 0,
+            "expected_version": moved["version"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })["card"]
+        self.assertEqual(moved_again["completed_at"], moved["completed_at"])
+
+    def test_leaving_completed_column_clears_timer(self):
+        completed = self.completed_column()
+        todo = app.list_columns(self.conn)[0]
+        card = self.create_card(completed["id"], "重新打开")
+        moved = app.move_card(self.conn, card["id"], {
+            "column_id": todo["id"], "position": 0,
+            "expected_version": card["version"],
+            "expected_board_revision": app.board_revision(self.conn),
+        })["card"]
+        self.assertIsNone(moved["completed_at"])
+
+    def test_cards_older_than_30_days_are_auto_archived(self):
+        completed = self.completed_column()
+        old = self.create_card(completed["id"], "旧完成卡片")
+        recent = self.create_card(completed["id"], "近期完成卡片")
+        self.conn.execute("UPDATE cards SET completed_at=? WHERE id=?", ("2026-01-01 00:00:00", old["id"]))
+        self.conn.execute("UPDATE cards SET completed_at=? WHERE id=?", ("2026-01-20 00:00:01", recent["id"]))
+        count = app.auto_archive_completed_cards(self.conn, datetime(2026, 1, 31, 0, 0, 0))
+        self.assertEqual(count, 1)
+        archived = app.get_card(self.conn, old["id"])
+        self.assertEqual(archived["archived"], 1)
+        self.assertEqual(archived["archive_reason"], "auto_completed")
+        self.assertEqual(app.get_card(self.conn, recent["id"])["archived"], 0)
+
+    def test_renaming_column_to_completed_starts_timer(self):
+        column = app.create_column(self.conn, {"name": "验收完成"})["column"]
+        card = self.create_card(column["id"], "已有卡片")
+        original_completed = self.completed_column()
+        app.delete_column(self.conn, original_completed["id"])
+        updated = app.update_column(self.conn, column["id"], {"name": "已完成"})["column"]
+        self.assertEqual(updated["name"], "已完成")
+        self.assertIsNotNone(app.get_card(self.conn, card["id"])["completed_at"])
 
 
 class BackupImportTests(DatabaseTestCase):

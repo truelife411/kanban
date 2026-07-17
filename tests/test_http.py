@@ -49,7 +49,7 @@ class HttpApiTests(unittest.TestCase):
         status, headers, body = self.request("GET", "/api/board")
         data = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(data["schema_version"], 2)
+        self.assertEqual(data["schema_version"], 3)
         self.assertEqual(len(data["columns"]), 3)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 
