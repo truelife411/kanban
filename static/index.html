@@ -1,8 +1,18 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="douban-classic">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script>
+        (function () {
+            try {
+                var theme = localStorage.getItem("kanban-theme");
+                if (["douban-classic", "douban-modern", "dark-tech", "office", "cloud-blue", "navy-blue", "aurora-blue"].indexOf(theme) >= 0) {
+                    document.documentElement.setAttribute("data-theme", theme);
+                }
+            } catch (_) {}
+        }());
+    </script>
     <title>看板</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -10,29 +20,51 @@
     <!-- 顶部工具栏 -->
     <header class="topbar">
         <div class="topbar-left">
-            <h1 class="logo">📋 看板</h1>
+            <h1 class="logo">
+                <span class="logo-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="14" y="11" width="7" height="10" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg></span>
+                <span>看板</span>
+            </h1>
         </div>
-        <div class="topbar-center">
-            <button id="btn-board" class="nav-btn active" onclick="showView('board')">看板</button>
-            <button id="btn-history" class="nav-btn" onclick="showView('history')">历史</button>
+        <div class="topbar-center view-tabs" role="tablist" aria-label="主要视图">
+            <button id="btn-board" class="nav-btn active" role="tab" aria-selected="true" aria-controls="view-board" tabindex="0" onclick="showView('board')">看板</button>
+            <button id="btn-history" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1" onclick="showView('history')">历史归档</button>
         </div>
         <div class="topbar-right">
-            <button class="icon-btn" title="刷新" onclick="refresh()">🔄</button>
-            <button class="icon-btn" title="导出JSON" onclick="exportJson()">⬇ 导出</button>
-            <button class="icon-btn" title="备份数据库" onclick="backupDb()">💾 备份</button>
-            <button class="icon-btn add-btn" title="新增列" onclick="addColumn()">+ 新列</button>
+            <button class="icon-btn" title="导入JSON" onclick="selectImportFile()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 14v5h14v-5"/></svg><span>导入</span></button>
+            <button class="icon-btn" title="导出JSON" onclick="exportJson()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4-4m-4 4-4-4M5 14v5h14v-5"/></svg><span>导出</span></button>
+            <button class="icon-btn" title="备份数据库" onclick="backupDb()"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg><span>备份</span></button>
+            <div class="theme-picker">
+                <button id="theme-button" class="icon-btn" type="button" aria-haspopup="menu" aria-expanded="false" onclick="toggleThemeMenu(event)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18h1.2a2 2 0 0 0 0-4H12a1.5 1.5 0 0 1 0-3h3a6 6 0 0 0 0-12h-3Z"/><circle cx="7.5" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="9.5" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="14" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg><span>主题</span></button>
+                <div id="theme-menu" class="theme-menu" role="menu" aria-label="选择主题" hidden>
+                    <button type="button" role="menuitemradio" data-theme-value="douban-classic" onclick="setTheme('douban-classic')"><span class="theme-swatch theme-swatch-classic"></span><span>经典豆瓣绿</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="douban-modern" onclick="setTheme('douban-modern')"><span class="theme-swatch theme-swatch-modern"></span><span>现代豆瓣绿</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="dark-tech" onclick="setTheme('dark-tech')"><span class="theme-swatch theme-swatch-dark"></span><span>深色科技</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="office" onclick="setTheme('office')"><span class="theme-swatch theme-swatch-office"></span><span>简约办公</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="cloud-blue" onclick="setTheme('cloud-blue')"><span class="theme-swatch theme-swatch-cloud"></span><span>云端蓝</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="navy-blue" onclick="setTheme('navy-blue')"><span class="theme-swatch theme-swatch-navy"></span><span>海军蓝</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="aurora-blue" onclick="setTheme('aurora-blue')"><span class="theme-swatch theme-swatch-aurora"></span><span>极光蓝紫</span><span class="theme-check">✓</span></button>
+                </div>
+            </div>
+            <button class="icon-btn add-btn" title="新增列" onclick="addColumn()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新列</span></button>
+            <input id="import-file" type="file" accept="application/json,.json" hidden>
         </div>
     </header>
 
     <!-- ============ 看板视图 ============ -->
-    <main id="view-board" class="board-view">
-        <div id="board" class="board">
+    <main id="view-board" class="board-view" role="tabpanel" aria-labelledby="btn-board" tabindex="0">
+        <div class="board-filters" aria-label="看板筛选">
+            <div id="due-filters" class="filter-group" aria-label="日期范围"></div>
+            <div id="priority-filters" class="filter-group priority-filter-group" aria-label="优先级"></div>
+            <div id="label-filters" class="filter-group label-filter-group" aria-label="标签"></div>
+            <button id="clear-filters" class="filter-clear" type="button" onclick="clearBoardFilters()" hidden>清除筛选</button>
+        </div>
+        <div id="board" class="board" aria-label="看板">
             <!-- 列由 JS 渲染 -->
         </div>
     </main>
 
     <!-- ============ 历史搜索视图 ============ -->
-    <main id="view-history" class="history-view" hidden>
+    <main id="view-history" class="history-view" role="tabpanel" aria-labelledby="btn-history" tabindex="0" hidden>
         <div class="search-panel">
             <input type="text" id="search-q" placeholder="搜索标题 / 描述 / 标签…" onkeydown="if(event.key==='Enter')doSearch()">
             <label>优先级
@@ -55,50 +87,50 @@
 
     <!-- ============ 卡片编辑弹窗 ============ -->
     <div id="card-modal" class="modal-overlay" hidden>
-        <div class="modal">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title-text">
             <div class="modal-header">
                 <h2 id="modal-title-text">编辑卡片</h2>
-                <button class="icon-btn danger" title="删除(归档)" onclick="deleteCurrentCard()">🗑</button>
-                <button class="icon-btn" title="关闭" onclick="closeCardModal()">✕</button>
+                <button class="icon-btn danger" aria-label="归档卡片" title="归档卡片" onclick="deleteCurrentCard()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg></button>
+                <button class="icon-btn" aria-label="关闭卡片编辑" title="关闭" onclick="closeCardModal()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
             </div>
             <div class="modal-body">
                 <label>标题 <span class="req">*</span>
                     <input type="text" id="card-title" placeholder="卡片标题">
                 </label>
                 <div class="field">
-                    <span class="field-label">描述</span>
+                    <span class="field-label" id="card-description-label">描述</span>
                     <div class="editor-toolbar" id="editor-toolbar">
-                        <button type="button" title="项目符号" data-cmd="insertUnorderedList">
-                            <svg viewBox="0 0 24 24"><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="6" x2="20" y2="6"/><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="12" x2="20" y2="12"/><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none"/><line x1="9" y1="18" x2="20" y2="18"/></svg>
-                        </button>
-                        <button type="button" title="编号" data-cmd="insertOrderedList">
-                            <svg viewBox="0 0 24 24"><text x="3" y="9" font-size="7" fill="currentColor" stroke="none">1.</text><text x="3" y="17" font-size="7" fill="currentColor" stroke="none">2.</text><line x1="10" y1="7" x2="20" y2="7"/><line x1="10" y1="15" x2="20" y2="15"/></svg>
-                        </button>
-                        <button type="button" title="增加缩进" data-cmd="indent">
-                            <svg viewBox="0 0 24 24"><polyline points="3,8 7,12 3,16"/><line x1="21" y1="6" x2="11" y2="6"/><line x1="21" y1="18" x2="11" y2="18"/><line x1="21" y1="12" x2="11" y2="12"/></svg>
-                        </button>
-                        <button type="button" title="减少缩进" data-cmd="outdent">
-                            <svg viewBox="0 0 24 24"><polyline points="21,8 17,12 21,16"/><line x1="3" y1="6" x2="13" y2="6"/><line x1="3" y1="18" x2="13" y2="18"/><line x1="3" y1="12" x2="13" y2="12"/></svg>
-                        </button>
-                        <span class="tb-sep"></span>
-                        <button type="button" title="斜体" data-cmd="italic">
-                            <svg viewBox="0 0 24 24"><line x1="19" y1="5" x2="10" y2="5"/><line x1="14" y1="19" x2="5" y2="19"/><line x1="15" y1="5" x2="9" y2="19"/></svg>
-                        </button>
-                        <button type="button" title="下划线" data-cmd="underline">
-                            <svg viewBox="0 0 24 24"><path d="M6 4v8a6 6 0 0 0 12 0V4"/><line x1="4" y1="20" x2="20" y2="20"/></svg>
-                        </button>
-                        <button type="button" title="删除线" data-cmd="strikeThrough">
-                            <svg viewBox="0 0 24 24"><line x1="4" y1="12" x2="20" y2="12"/><path d="M8 8c0-2 2-3 4-3s4 1 4 3M8 16c0 2 2 3 4 3s4-1 4-3"/></svg>
-                        </button>
-                        <span class="tb-sep"></span>
-                        <button type="button" title="撤销" data-cmd="undo">
-                            <svg viewBox="0 0 24 24"><polyline points="9,14 4,9 9,4"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H10"/></svg>
-                        </button>
-                        <button type="button" title="重做" data-cmd="redo">
-                            <svg viewBox="0 0 24 24"><polyline points="15,14 20,9 15,4"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H14"/></svg>
-                        </button>
+                        <div class="tb-group" role="group" aria-label="列表和缩进">
+                            <button type="button" title="项目符号" aria-label="项目符号" data-cmd="insertUnorderedList">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="18" r="1.25" fill="currentColor" stroke="none"/><path d="M10 6h9M10 12h9M10 18h9"/></svg>
+                            </button>
+                            <button type="button" title="编号" aria-label="编号" data-cmd="insertOrderedList">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h1v4M4 9h2M4 13.5c.4-.5 2-.6 2 .5 0 1-2 1.5-2 3h2M10 6h9M10 12h9M10 18h9"/></svg>
+                            </button>
+                            <button type="button" title="减少缩进" aria-label="减少缩进" data-cmd="outdent">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h9M10 12h9M10 18h9M7 9l-3 3 3 3"/></svg>
+                            </button>
+                            <button type="button" title="增加缩进" aria-label="增加缩进" data-cmd="indent">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h9M10 12h9M10 18h9M4 9l3 3-3 3"/></svg>
+                            </button>
+                        </div>
+                        <span class="tb-sep" aria-hidden="true"></span>
+                        <div class="tb-group" role="group" aria-label="文字格式">
+                            <button type="button" title="斜体" aria-label="斜体" data-cmd="italic"><span class="tb-letter italic">I</span></button>
+                            <button type="button" title="下划线" aria-label="下划线" data-cmd="underline"><span class="tb-letter underline">U</span></button>
+                            <button type="button" title="删除线" aria-label="删除线" data-cmd="strikeThrough"><span class="tb-letter strike">S</span></button>
+                        </div>
+                        <span class="tb-sep tb-sep-history" aria-hidden="true"></span>
+                        <div class="tb-group tb-history" role="group" aria-label="操作历史">
+                            <button type="button" title="撤销" aria-label="撤销" data-cmd="undo">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8l-4 4 4 4M5 12h8a6 6 0 0 1 6 6"/></svg>
+                            </button>
+                            <button type="button" title="重做" aria-label="重做" data-cmd="redo">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 8l4 4-4 4M19 12h-8a6 6 0 0 0-6 6"/></svg>
+                            </button>
+                        </div>
                     </div>
-                    <div id="card-description" class="editor" contenteditable="true" data-placeholder="详细描述…"></div>
+                    <div id="card-description" class="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="card-description-label" data-placeholder="详细描述…"></div>
                 </div>
                 <label><span class="label-inline">标签 <small>(逗号分隔)</small></span>
                     <input type="text" id="card-labels" placeholder="如: bug, 紧急">
@@ -109,6 +141,18 @@
                         <input type="time" id="card-due-time" placeholder="时间">
                     </div>
                 </label>
+                <label>所在列
+                    <select id="card-column"></select>
+                </label>
+                <div class="field" id="card-move-controls" hidden>
+                    <span class="field-label">调整位置</span>
+                    <div class="move-controls">
+                        <button type="button" class="ghost" onclick="moveCurrentCard('top')">移到顶部</button>
+                        <button type="button" class="ghost" onclick="moveCurrentCard('up')">上移</button>
+                        <button type="button" class="ghost" onclick="moveCurrentCard('down')">下移</button>
+                        <button type="button" class="ghost" onclick="moveCurrentCard('bottom')">移到底部</button>
+                    </div>
+                </div>
                 <label>优先级
                     <select id="card-priority">
                         <option value="high">高</option>
@@ -129,10 +173,10 @@
 
     <!-- ============ 新增列弹窗 ============ -->
     <div id="column-modal" class="modal-overlay" hidden>
-        <div class="modal small">
+        <div class="modal small" role="dialog" aria-modal="true" aria-labelledby="column-modal-title">
             <div class="modal-header">
-                <h2>新增列</h2>
-                <button class="icon-btn" onclick="closeColumnModal()">✕</button>
+                <h2 id="column-modal-title">新增列</h2>
+                <button class="icon-btn" aria-label="关闭新增列" onclick="closeColumnModal()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
             </div>
             <div class="modal-body">
                 <label>列名 <span class="req">*</span>
@@ -150,7 +194,8 @@
     </div>
 
     <!-- Toast 提示 -->
-    <div id="toast" class="toast" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+    <div id="live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
     <script src="/static/app.js"></script>
 </body>
