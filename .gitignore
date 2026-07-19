@@ -1,7 +1,10 @@
 # 本地数据库（运行时生成，含真实看板数据，不入库）
 *.db
+*.db-wal
+*.db-shm
 kanban.db
 backups/
+attachments/
 
 # Python
 __pycache__/

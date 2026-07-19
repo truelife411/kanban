@@ -15,7 +15,8 @@ class HttpApiTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp.name, "http.db")
         self.backup_dir = os.path.join(self.temp.name, "backups")
-        self.patches = [mock.patch.object(app, "DB_PATH", self.db_path), mock.patch.object(app, "BACKUP_DIR", self.backup_dir)]
+        self.attachments_dir = os.path.join(self.temp.name, "attachments")
+        self.patches = [mock.patch.object(app, "DB_PATH", self.db_path), mock.patch.object(app, "BACKUP_DIR", self.backup_dir), mock.patch.object(app, "ATTACHMENTS_DIR", self.attachments_dir)]
         for patch in self.patches:
             patch.start()
         app.init_db()
@@ -30,6 +31,15 @@ class HttpApiTests(unittest.TestCase):
         for patch in reversed(self.patches):
             patch.stop()
         self.temp.cleanup()
+
+    def raw_request(self, method, path, body=b"", headers=None):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        connection.request(method, path, body, headers or {})
+        response = connection.getresponse()
+        content = response.read()
+        result = (response.status, dict(response.getheaders()), content)
+        connection.close()
+        return result
 
     def request(self, method, path, body=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
@@ -49,7 +59,7 @@ class HttpApiTests(unittest.TestCase):
         status, headers, body = self.request("GET", "/api/board")
         data = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(data["schema_version"], 3)
+        self.assertEqual(data["schema_version"], 4)
         self.assertEqual(len(data["columns"]), 3)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 
@@ -74,6 +84,31 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(json.loads(body)["error"]["code"], "BOARD_REVISION_CONFLICT")
         self.assertEqual(created["card"]["title"], "HTTP 卡片")
+
+    def test_attachment_http_flow(self):
+        _, _, board_body = self.request("GET", "/api/board")
+        board = json.loads(board_body)
+        column_id = board["columns"][0]["id"]
+        status, _, body = self.request("POST", "/api/cards/drafts", {"column_id": column_id, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 201)
+        draft = json.loads(body)["card"]
+        payload = "附件内容".encode("utf-8")
+        status, _, body = self.raw_request("POST", f"/api/cards/{draft['id']}/attachments", payload, {"Content-Type": "application/octet-stream", "X-File-Name": "%E9%9C%80%E6%B1%82.txt", "X-File-Type": "text/plain"})
+        self.assertEqual(status, 201)
+        attachment = json.loads(body)
+        status, headers, body = self.raw_request("GET", f"/api/attachments/{attachment['id']}/download")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, payload)
+        self.assertIn("filename*=UTF-8''", headers["Content-Disposition"])
+        status, _, body = self.raw_request("DELETE", f"/api/attachments/{attachment['id']}", headers={"X-Attachment-Version": str(attachment["version"])})
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+
+    def test_backup_is_zip(self):
+        status, headers, body = self.raw_request("GET", "/api/backup")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/zip")
+        self.assertTrue(body.startswith(b"PK"))
 
 
 if __name__ == "__main__":

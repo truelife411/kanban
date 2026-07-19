@@ -1,32 +1,152 @@
 # -*- coding: utf-8 -*-
 """看板系统后端：Python 标准库 + SQLite。"""
 
+import base64
+import errno
+import hashlib
 import json
+import mimetypes
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
 import threading
+import time
+import unicodedata
+import uuid
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from html import escape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "kanban.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+ATTACHMENTS_DIR = os.path.join(BASE_DIR, "attachments")
 HOST = os.environ.get("KANBAN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("KANBAN_PORT", "8000"))
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 EXPORT_VERSION = 2
 MAX_JSON_BODY = 1024 * 1024
 MAX_IMPORT_BODY = 10 * 1024 * 1024
 VALID_PRIORITY = ("high", "medium", "low")
+MIN_FREE_BYTES = int(os.environ.get("KANBAN_MIN_FREE_BYTES", str(512 * 1024 * 1024)))
+MAX_ZIP_ENTRIES = int(os.environ.get("KANBAN_MAX_ZIP_ENTRIES", "100000"))
+MAX_ZIP_RATIO = int(os.environ.get("KANBAN_MAX_ZIP_RATIO", "200"))
+MAX_ZIP_EXPANDED_BYTES = int(os.environ.get("KANBAN_MAX_ZIP_EXPANDED_BYTES", "0"))
+RESTORE_TOKENS = {}
+RESTORE_TOKEN_LOCK = threading.Lock()
+RESTORE_TOKEN_TTL = 60 * 60
+DRAFT_TTL = 24 * 60 * 60
+CLEANUP_AGE = 24 * 60 * 60
+MAINTENANCE_REPORT = {"missing": [], "orphans": [], "size_mismatch": [], "cleanup": []}
+
+
+class MaintenanceGate:
+    def __init__(self):
+        self.condition = threading.Condition(threading.RLock())
+        self.readers = 0
+        self.writer = None
+        self.writer_depth = 0
+        self.waiting_writers = 0
+        self.local = threading.local()
+
+    @contextmanager
+    def shared(self):
+        ident = threading.get_ident()
+        if self.writer == ident:
+            yield
+            return
+        depth = getattr(self.local, "shared_depth", 0)
+        with self.condition:
+            if depth == 0:
+                while self.writer is not None or self.waiting_writers:
+                    self.condition.wait()
+                self.readers += 1
+            self.local.shared_depth = depth + 1
+        try:
+            yield
+        finally:
+            with self.condition:
+                depth = self.local.shared_depth - 1
+                self.local.shared_depth = depth
+                if depth == 0:
+                    self.readers -= 1
+                    self.condition.notify_all()
+
+    @contextmanager
+    def exclusive(self):
+        ident = threading.get_ident()
+        with self.condition:
+            if self.writer == ident:
+                self.writer_depth += 1
+            else:
+                if getattr(self.local, "shared_depth", 0):
+                    raise RuntimeError("不能从共享维护门禁升级为独占门禁")
+                self.waiting_writers += 1
+                try:
+                    while self.writer is not None or self.readers:
+                        self.condition.wait()
+                    self.writer = ident
+                    self.writer_depth = 1
+                finally:
+                    self.waiting_writers -= 1
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.writer_depth -= 1
+                if self.writer_depth == 0:
+                    self.writer = None
+                    self.condition.notify_all()
+
+
+MAINTENANCE_GATE = MaintenanceGate()
 DB_MAINTENANCE_LOCK = threading.RLock()
+
+
+def ensure_free_space(path, incoming=0):
+    root = path if os.path.isdir(path) else os.path.dirname(path) or BASE_DIR
+    os.makedirs(root, exist_ok=True)
+    if shutil.disk_usage(root).free - incoming < MIN_FREE_BYTES:
+        raise ApiError("磁盘剩余空间不足，请清理空间后重试", 507, "INSUFFICIENT_DISK_SPACE")
+
+
+def stream_copy_limited(source, output, expected=None, disk_path=None, hasher=None):
+    written = 0
+    remaining = expected
+    while remaining is None or remaining > 0:
+        chunk = source.read(65536 if remaining is None else min(65536, remaining))
+        if not chunk:
+            if remaining:
+                raise ApiError("上传内容中断", 400, "UPLOAD_INTERRUPTED")
+            break
+        if disk_path:
+            ensure_free_space(disk_path, len(chunk))
+        output.write(chunk)
+        if hasher:
+            hasher.update(chunk)
+        written += len(chunk)
+        if remaining is not None:
+            remaining -= len(chunk)
+    return written
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def now_iso():
@@ -147,6 +267,202 @@ def sanitize_description(value):
     return "".join(parser.output).strip()
 
 
+def validate_attachment_name(value):
+    if not isinstance(value, str) or not value or len(value) > 255:
+        fail("文件名不能为空且不能超过 255 个字符", field="file_name")
+    name = value
+    if name in (".", "..") or any(char in name for char in '/\\:*?"<>|') or name.endswith((" ", ".")):
+        fail("文件名包含当前系统不支持的字符，请重命名文件后再上传", field="file_name")
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
+        fail("文件名包含当前系统不支持的字符，请重命名文件后再上传", field="file_name")
+    if len(name.encode("utf-8")) > 255:
+        raise ApiError("文件名过长，请缩短后再上传", 422, "ATTACHMENT_NAME_TOO_LONG", {"field": "file_name"})
+    stem = name.split(".", 1)[0].upper()
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {"COM%s" % i for i in range(1, 10)} | {"LPT%s" % i for i in range(1, 10)}
+    if stem in reserved:
+        fail("文件名是系统保留名称，请重命名后再上传", field="file_name")
+    return name
+
+
+def attachment_name_key(name):
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def attachment_directory(card_id):
+    return os.path.join(ATTACHMENTS_DIR, str(card_id))
+
+
+def attachment_path(card_id, file_name):
+    root = os.path.abspath(ATTACHMENTS_DIR)
+    path = os.path.abspath(os.path.join(attachment_directory(card_id), file_name))
+    if os.path.commonpath((root, path)) != root:
+        raise ApiError("附件路径无效", 400, "INVALID_ATTACHMENT_PATH")
+    return path
+
+
+def row_to_attachment(row):
+    result = {key: row[key] for key in ("id", "card_id", "file_name", "content_type", "size", "created_at", "updated_at", "version")}
+    result["file_missing"] = not os.path.isfile(attachment_path(row["card_id"], row["file_name"]))
+    return result
+
+
+def list_attachments(conn, card_id):
+    if conn.execute("SELECT 1 FROM cards WHERE id=?", (card_id,)).fetchone() is None:
+        raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
+    return [row_to_attachment(row) for row in conn.execute("SELECT * FROM attachments WHERE card_id=? ORDER BY id", (card_id,))]
+
+
+def get_attachment(conn, attachment_id):
+    row = conn.execute("SELECT * FROM attachments WHERE id=?", (attachment_id,)).fetchone()
+    if row is None:
+        raise ApiError("附件不存在", 404, "ATTACHMENT_NOT_FOUND")
+    return row
+
+
+def _attachment_conflict(existing):
+    raise ApiError("同名附件已存在，是否覆盖？", 409, "ATTACHMENT_EXISTS", {"attachment": row_to_attachment(existing)})
+
+
+def _file_in_use_error(error):
+    if isinstance(error, PermissionError):
+        return ApiError("文件正在被其他程序使用，请关闭相关程序后重试", 409, "ATTACHMENT_FILE_IN_USE")
+    return error
+
+
+def save_attachment(conn, card_id, file_name, content_type, input_stream, content_length, replace=False, expected_version=None):
+    file_name = validate_attachment_name(file_name)
+    if content_length < 0:
+        raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
+    directory = attachment_directory(card_id)
+    os.makedirs(directory, exist_ok=True)
+    ensure_free_space(directory, min(content_length, 65536))
+    fd, temp_path = tempfile.mkstemp(prefix=".upload-", dir=directory)
+    os.close(fd)
+    rollback_path = None
+    target_path = attachment_path(card_id, file_name)
+    installed = False
+    committed = False
+    existing = None
+    try:
+        with open(temp_path, "wb") as output:
+            written = stream_copy_limited(input_stream, output, content_length, directory)
+        with MAINTENANCE_GATE.shared(), DB_MAINTENANCE_LOCK:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                card = conn.execute("SELECT id,archived,is_draft FROM cards WHERE id=?", (card_id,)).fetchone()
+                if card is None:
+                    raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
+                if card["archived"]:
+                    raise ApiError("归档卡片不能修改附件，请先恢复", 409, "CARD_ARCHIVED")
+                existing = conn.execute("SELECT * FROM attachments WHERE card_id=? AND name_key=?", (card_id, attachment_name_key(file_name))).fetchone()
+                if existing is not None and not replace:
+                    _attachment_conflict(existing)
+                if replace and existing is None:
+                    raise ApiError("要覆盖的附件已不存在，请重新上传", 409, "ATTACHMENT_VERSION_CONFLICT")
+                if existing is not None and (expected_version is None or existing["version"] != expected_version):
+                    raise ApiError("附件已在其他页面被更新，请重新确认后再覆盖", 409, "ATTACHMENT_VERSION_CONFLICT")
+                if existing is not None:
+                    old_path = attachment_path(card_id, existing["file_name"])
+                    if os.path.isfile(old_path):
+                        rollback_path = old_path + ".rollback-" + uuid.uuid4().hex
+                        os.replace(old_path, rollback_path)
+                os.replace(temp_path, target_path)
+                installed = True
+                ts = now_iso()
+                if existing is None:
+                    try:
+                        cursor = conn.execute("INSERT INTO attachments (card_id,file_name,name_key,content_type,size,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", (card_id, file_name, attachment_name_key(file_name), content_type or "", written, ts, ts))
+                    except sqlite3.IntegrityError:
+                        current = conn.execute("SELECT * FROM attachments WHERE card_id=? AND name_key=?", (card_id, attachment_name_key(file_name))).fetchone()
+                        if current is not None:
+                            _attachment_conflict(current)
+                        raise
+                    attachment_id = cursor.lastrowid
+                else:
+                    conn.execute("UPDATE attachments SET file_name=?,name_key=?,content_type=?,size=?,updated_at=?,version=version+1 WHERE id=?", (file_name, attachment_name_key(file_name), content_type or "", written, ts, existing["id"]))
+                    attachment_id = existing["id"]
+                if card["is_draft"]:
+                    conn.execute("UPDATE cards SET updated_at=? WHERE id=?", (ts, card_id))
+                conn.commit()
+                committed = True
+            except Exception:
+                conn.rollback()
+                if installed and os.path.isfile(target_path):
+                    os.remove(target_path)
+                installed = False
+                if rollback_path and os.path.isfile(rollback_path) and existing is not None:
+                    os.replace(rollback_path, attachment_path(card_id, existing["file_name"]))
+                    rollback_path = None
+                raise
+            if rollback_path and os.path.isfile(rollback_path):
+                try:
+                    os.remove(rollback_path)
+                except OSError:
+                    MAINTENANCE_REPORT["cleanup"].append(rollback_path)
+        return row_to_attachment(get_attachment(conn, attachment_id))
+    except OSError as error:
+        if error.errno in (errno.ENAMETOOLONG, errno.EINVAL):
+            raise ApiError("文件名或路径过长，请缩短文件名后重试", 422, "ATTACHMENT_NAME_TOO_LONG")
+        raise _file_in_use_error(error)
+    except Exception as error:
+        if not committed:
+            try:
+                if os.path.isfile(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+        raise _file_in_use_error(error)
+
+
+def delete_attachment(conn, attachment_id, expected_version=None):
+    trash = None
+    path = None
+    row = None
+    committed = False
+    try:
+        with MAINTENANCE_GATE.shared(), DB_MAINTENANCE_LOCK:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = get_attachment(conn, attachment_id)
+                card = conn.execute("SELECT archived,is_draft FROM cards WHERE id=?", (row["card_id"],)).fetchone()
+                if card and card["archived"]:
+                    raise ApiError("归档卡片不能删除附件，请先恢复", 409, "CARD_ARCHIVED")
+                if expected_version is None or row["version"] != expected_version:
+                    raise ApiError("附件已在其他页面被更新，请刷新后重试", 409, "ATTACHMENT_VERSION_CONFLICT")
+                path = attachment_path(row["card_id"], row["file_name"])
+                if os.path.isfile(path):
+                    trash = path + ".deleting-" + uuid.uuid4().hex
+                    os.replace(path, trash)
+                conn.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
+                if card and card["is_draft"]:
+                    conn.execute("UPDATE cards SET updated_at=? WHERE id=?", (now_iso(), row["card_id"]))
+                conn.commit()
+                committed = True
+            except Exception:
+                conn.rollback()
+                if trash and path and os.path.isfile(trash):
+                    os.replace(trash, path)
+                    trash = None
+                raise
+            if trash and os.path.isfile(trash):
+                try:
+                    os.remove(trash)
+                except OSError:
+                    MAINTENANCE_REPORT["cleanup"].append(trash)
+            try:
+                os.rmdir(attachment_directory(row["card_id"]))
+            except OSError:
+                pass
+        return {"ok": True}
+    except Exception as error:
+        if not committed and trash and path and os.path.isfile(trash):
+            try:
+                os.replace(trash, path)
+            except OSError:
+                pass
+        raise _file_in_use_error(error)
+
+
 def normalize_card_fields(data):
     require_object(data)
     return {
@@ -193,21 +509,92 @@ def create_backup(prefix="auto", required=True):
         return None
 
 
-def maybe_daily_backup():
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    files = [os.path.join(BACKUP_DIR, n) for n in os.listdir(BACKUP_DIR)
-             if n.startswith("kanban-auto-") and n.endswith(".db")]
-    if files and datetime.now().timestamp() - max(os.path.getmtime(p) for p in files) < 86400:
-        return
-    if create_backup("auto", required=False):
-        files = sorted((os.path.join(BACKUP_DIR, n) for n in os.listdir(BACKUP_DIR)
-                        if n.startswith("kanban-auto-") and n.endswith(".db")),
-                       key=os.path.getmtime, reverse=True)
-        for path in files[10:]:
+def cleanup_expired_drafts(conn, now=None):
+    cutoff = datetime.fromtimestamp((now or datetime.now()).timestamp() - DRAFT_TTL).strftime("%Y-%m-%d %H:%M:%S")
+    rows = conn.execute("SELECT id FROM cards WHERE is_draft=1 AND updated_at<?", (cutoff,)).fetchall()
+    cleaned = 0
+    with MAINTENANCE_GATE.shared(), DB_MAINTENANCE_LOCK:
+        for row in rows:
+            directory = attachment_directory(row["id"])
+            rollback = directory + ".draft-expired-" + uuid.uuid4().hex
+            moved = False
             try:
-                os.remove(path)
-            except OSError:
-                pass
+                if os.path.isdir(directory):
+                    os.replace(directory, rollback)
+                    moved = True
+                with transaction(conn):
+                    cursor = conn.execute("DELETE FROM cards WHERE id=? AND is_draft=1", (row["id"],))
+                if cursor.rowcount:
+                    cleaned += 1
+                if moved:
+                    shutil.rmtree(rollback, ignore_errors=True)
+            except Exception:
+                if moved and os.path.isdir(rollback) and not os.path.exists(directory):
+                    os.replace(rollback, directory)
+                raise
+    return cleaned
+
+
+def reconcile_attachments(conn):
+    report = {"missing": [], "orphans": [], "size_mismatch": [], "cleanup": []}
+    os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+    known = {}
+    for row in conn.execute("SELECT id,card_id,file_name,size FROM attachments"):
+        path = attachment_path(row["card_id"], row["file_name"])
+        known[os.path.abspath(path)] = row
+        if not os.path.isfile(path):
+            report["missing"].append(path)
+        elif os.path.getsize(path) != row["size"]:
+            report["size_mismatch"].append(path)
+    cutoff = time.time() - CLEANUP_AGE
+    for root, _, files in os.walk(ATTACHMENTS_DIR):
+        for name in files:
+            path = os.path.abspath(os.path.join(root, name))
+            if ".upload-" in name and os.path.getmtime(path) < cutoff:
+                try:
+                    os.remove(path)
+                    report["cleanup"].append(path)
+                except OSError:
+                    pass
+                continue
+            if ".rollback-" in name:
+                original = path.split(".rollback-", 1)[0]
+                if os.path.isfile(original):
+                    try:
+                        os.remove(path)
+                        report["cleanup"].append(path)
+                    except OSError:
+                        pass
+                elif original in known:
+                    try:
+                        os.replace(path, original)
+                        report["cleanup"].append(original)
+                    except OSError:
+                        pass
+                continue
+            if ".deleting-" in name:
+                original = path.split(".deleting-", 1)[0]
+                if original in known and not os.path.exists(original):
+                    try:
+                        os.replace(path, original)
+                        report["cleanup"].append(original)
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        os.remove(path)
+                        report["cleanup"].append(path)
+                    except OSError:
+                        pass
+                continue
+            if path not in known:
+                report["orphans"].append(path)
+    MAINTENANCE_REPORT.clear()
+    MAINTENANCE_REPORT.update(report)
+    if any(report.values()):
+        print("附件维护检查：缺失 %d，孤儿 %d，大小异常 %d，已清理/恢复 %d" %
+              (len(report["missing"]), len(report["orphans"]), len(report["size_mismatch"]), len(report["cleanup"])))
+    return report
 
 
 def init_db():
@@ -223,13 +610,25 @@ def init_db():
                     description TEXT DEFAULT '',labels TEXT DEFAULT '',due_date TEXT DEFAULT '',
                     priority TEXT NOT NULL DEFAULT 'medium',position INTEGER NOT NULL DEFAULT 0,
                     archived INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
-                    completed_at TEXT,archived_at TEXT,archive_reason TEXT,
+                    completed_at TEXT,archived_at TEXT,archive_reason TEXT,is_draft INTEGER NOT NULL DEFAULT 0,
                     version INTEGER NOT NULL DEFAULT 1,
                     FOREIGN KEY (column_id) REFERENCES columns(id) ON DELETE CASCADE)""")
                 conn.execute("CREATE TABLE board_state (id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL)")
+                conn.execute("""CREATE TABLE attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,card_id INTEGER NOT NULL,file_name TEXT NOT NULL,
+                    name_key TEXT NOT NULL,content_type TEXT DEFAULT '',size INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,updated_at TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (card_id) REFERENCES cards(id) ON DELETE CASCADE,
+                    UNIQUE(card_id,name_key))""")
+                conn.execute("CREATE INDEX idx_attachments_card ON attachments(card_id,id)")
+                conn.execute("CREATE INDEX idx_columns_active_position ON columns(deleted_at,position,id)")
+                conn.execute("CREATE INDEX idx_cards_active_position ON cards(is_draft,archived,column_id,position,id)")
+                conn.execute("CREATE INDEX idx_cards_archived_updated ON cards(is_draft,archived,updated_at,id)")
+                conn.execute("CREATE INDEX idx_cards_auto_archive ON cards(is_draft,archived,column_id,completed_at)")
+                conn.execute("CREATE INDEX idx_cards_draft_updated ON cards(is_draft,updated_at,id)")
                 conn.execute("INSERT INTO board_state VALUES (1,1,?)", (now_iso(),))
                 conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
-                conn.execute("PRAGMA user_version = 3")
+                conn.execute("PRAGMA user_version = 4")
         else:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -270,17 +669,41 @@ def init_db():
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_auto_archive ON cards(archived,column_id,completed_at)")
                     conn.execute("PRAGMA user_version = 3")
                 version = 3
+            if version < 4:
+                with transaction(conn):
+                    if not _column_exists(conn, "cards", "is_draft"):
+                        conn.execute("ALTER TABLE cards ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
+                    conn.execute("""CREATE TABLE IF NOT EXISTS attachments (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,card_id INTEGER NOT NULL,file_name TEXT NOT NULL,
+                        name_key TEXT NOT NULL,content_type TEXT DEFAULT '',size INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,updated_at TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,
+                        FOREIGN KEY (card_id) REFERENCES cards(id) ON DELETE CASCADE,
+                        UNIQUE(card_id,name_key))""")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_card ON attachments(card_id,id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_draft_updated ON cards(is_draft,updated_at,id)")
+                    conn.execute("PRAGMA user_version = 4")
+                version = 4
+            with transaction(conn):
+                if not _column_exists(conn, "cards", "is_draft"):
+                    conn.execute("ALTER TABLE cards ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_columns_active_position ON columns(deleted_at,position,id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_active_position ON cards(is_draft,archived,column_id,position,id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_archived_updated ON cards(is_draft,archived,updated_at,id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_auto_archive ON cards(is_draft,archived,column_id,completed_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_draft_updated ON cards(is_draft,updated_at,id)")
         if conn.execute("SELECT COUNT(*) FROM columns WHERE deleted_at IS NULL").fetchone()[0] == 0:
             with transaction(conn):
                 conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
                 bump_revision(conn)
+        cleanup_expired_drafts(conn)
+        reconcile_attachments(conn)
         if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("数据库完整性检查失败")
         if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise RuntimeError("数据库外键检查失败")
     finally:
         conn.close()
-    maybe_daily_backup()
+    os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 
 def board_revision(conn):
@@ -292,8 +715,10 @@ def bump_revision(conn):
     return board_revision(conn)
 
 
-def check_revision(conn, expected):
+def check_revision(conn, expected, required=False):
     if expected is None:
+        if required:
+            raise ApiError("缺少看板版本，请刷新后重试", 400, "INVALID_BOARD_REVISION")
         return
     require_int(expected, "expected_board_revision", 1)
     actual = board_revision(conn)
@@ -301,8 +726,10 @@ def check_revision(conn, expected):
         raise ApiError("看板已发生变化，请刷新后重试", 409, "BOARD_REVISION_CONFLICT", {"expected": expected, "actual": actual})
 
 
-def check_version(row, expected):
+def check_version(row, expected, required=False):
     if expected is None:
+        if required:
+            raise ApiError("缺少内容版本，请刷新后重试", 400, "INVALID_VERSION")
         return
     require_int(expected, "expected_version", 1)
     if expected != row["version"]:
@@ -315,6 +742,8 @@ def row_to_column(row):
 
 def row_to_card(row):
     result = {key: row[key] for key in ("id", "column_id", "title", "description", "labels", "due_date", "priority", "position", "archived", "created_at", "updated_at", "completed_at", "archived_at", "archive_reason", "version")}
+    if "attachment_count" in row.keys():
+        result["attachment_count"] = row["attachment_count"]
     if "column_name" in row.keys():
         result.update(column_name=row["column_name"], column_deleted=bool(row["column_deleted"]))
         if "restore_column_id" in row.keys():
@@ -328,15 +757,20 @@ def list_columns(conn, include_deleted=False):
 
 
 def list_cards(conn, column_id=None, archived=0):
-    sql, params = "SELECT * FROM cards WHERE archived=?", [archived]
+    sql, params = """SELECT cards.*,(SELECT COUNT(*) FROM attachments WHERE attachments.card_id=cards.id) AS attachment_count
+                     FROM cards WHERE archived=? AND is_draft=0""", [archived]
     if column_id is not None:
         sql += " AND column_id=?"
         params.append(column_id)
     return [row_to_card(r) for r in conn.execute(sql + " ORDER BY position,id", params)]
 
 
-def get_card(conn, cid):
-    row = conn.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+def get_card(conn, cid, include_draft=False):
+    sql = """SELECT cards.*,(SELECT COUNT(*) FROM attachments WHERE attachments.card_id=cards.id) AS attachment_count
+             FROM cards WHERE id=?"""
+    if not include_draft:
+        sql += " AND is_draft=0"
+    row = conn.execute(sql, (cid,)).fetchone()
     if row is None:
         raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
     return row_to_card(row)
@@ -352,7 +786,7 @@ def auto_archive_completed_cards(conn, now=None):
     completed = conn.execute("SELECT * FROM columns WHERE deleted_at IS NULL AND trim(name)='已完成' LIMIT 1").fetchone()
     if completed is None:
         return 0
-    rows = conn.execute("SELECT id FROM cards WHERE column_id=? AND archived=0 AND completed_at IS NOT NULL AND completed_at<=?", (completed["id"], cutoff)).fetchall()
+    rows = conn.execute("SELECT id FROM cards WHERE column_id=? AND archived=0 AND is_draft=0 AND completed_at IS NOT NULL AND completed_at<=?", (completed["id"], cutoff)).fetchall()
     if not rows:
         return 0
     ts = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -423,7 +857,7 @@ def update_column(conn, cid, data):
 
 
 def _active_card_ids(conn, column_id, exclude=None):
-    return [r["id"] for r in conn.execute("SELECT id FROM cards WHERE column_id=? AND archived=0 ORDER BY position,id", (column_id,)) if r["id"] != exclude]
+    return [r["id"] for r in conn.execute("SELECT id FROM cards WHERE column_id=? AND archived=0 AND is_draft=0 ORDER BY position,id", (column_id,)) if r["id"] != exclude]
 
 
 def _rewrite_positions(conn, column_id, ids):
@@ -439,8 +873,8 @@ def delete_column(conn, cid, data=None):
         if conn.execute("SELECT COUNT(*) FROM columns WHERE deleted_at IS NULL").fetchone()[0] <= 1:
             raise ApiError("不能删除最后一个列", 409, "LAST_ACTIVE_COLUMN")
         ts = now_iso()
-        count = conn.execute("SELECT COUNT(*) FROM cards WHERE column_id=? AND archived=0", (cid,)).fetchone()[0]
-        conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='column_deleted',updated_at=?,version=version+1 WHERE column_id=? AND archived=0", (ts, ts, cid))
+        count = conn.execute("SELECT COUNT(*) FROM cards WHERE column_id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()[0]
+        conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='column_deleted',updated_at=?,version=version+1 WHERE column_id=? AND archived=0 AND is_draft=0", (ts, ts, cid))
         conn.execute("UPDATE columns SET deleted_at=?,version=version+1 WHERE id=?", (ts, cid))
         for index, col in enumerate(conn.execute("SELECT id FROM columns WHERE deleted_at IS NULL ORDER BY position,id")):
             conn.execute("UPDATE columns SET position=? WHERE id=?", (index, col["id"]))
@@ -467,6 +901,56 @@ def reorder_columns(conn, data):
     return {"columns": list_columns(conn), "revision": revision}
 
 
+def create_card_draft(conn, data):
+    data = require_object(data)
+    column_id = require_int(data.get("column_id"), "column_id", 1)
+    with transaction(conn):
+        check_revision(conn, data.get("expected_board_revision"))
+        active_column(conn, column_id)
+        ts = now_iso()
+        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,is_draft)
+                            VALUES (?,'','','','','medium',0,0,?,?,1)""", (column_id, ts, ts))
+    return {"card": get_card(conn, cur.lastrowid, include_draft=True), "revision": board_revision(conn)}
+
+
+def finalize_card_draft(conn, cid, data):
+    fields = normalize_card_fields(data)
+    column_id = require_int(data.get("column_id"), "column_id", 1)
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=1", (cid,)).fetchone()
+        if row is None:
+            raise ApiError("草稿卡片不存在", 404, "DRAFT_NOT_FOUND")
+        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        column = active_column(conn, column_id)
+        position, ts = len(_active_card_ids(conn, column_id)), now_iso()
+        completed_at = ts if is_completed_column(column) else None
+        conn.execute("""UPDATE cards SET column_id=?,title=?,description=?,labels=?,due_date=?,priority=?,position=?,completed_at=?,updated_at=?,is_draft=0,version=version+1 WHERE id=?""",
+                     (column_id, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], position, completed_at, ts, cid))
+        revision = bump_revision(conn)
+    return {"card": get_card(conn, cid), "revision": revision}
+
+
+def delete_card_draft(conn, cid, expected_version=None):
+    with DB_MAINTENANCE_LOCK:
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=1", (cid,)).fetchone()
+        if row is None:
+            raise ApiError("草稿卡片不存在", 404, "DRAFT_NOT_FOUND")
+        check_version(row, expected_version)
+        directory = attachment_directory(cid)
+        rollback = directory + ".draft-delete-" + uuid.uuid4().hex
+        if os.path.isdir(directory):
+            os.replace(directory, rollback)
+        try:
+            with transaction(conn):
+                conn.execute("DELETE FROM cards WHERE id=? AND is_draft=1", (cid,))
+        except Exception:
+            if os.path.isdir(rollback):
+                os.replace(rollback, directory)
+            raise
+        shutil.rmtree(rollback, ignore_errors=True)
+    return {"ok": True}
+
+
 def create_card(conn, data):
     fields = normalize_card_fields(data); column_id = require_int(data.get("column_id"), "column_id", 1)
     with transaction(conn):
@@ -481,12 +965,36 @@ def create_card(conn, data):
 
 def update_card(conn, cid, data):
     fields = normalize_card_fields(data)
+    current = conn.execute("SELECT column_id FROM cards WHERE id=?", (cid,)).fetchone()
+    if current is None:
+        raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
+    target_column_id = require_int(data.get("column_id", current["column_id"]), "column_id", 1)
+    requested_position = data.get("position")
+    if requested_position is not None:
+        requested_position = require_int(requested_position, "position", 0)
     with transaction(conn):
-        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0", (cid,)).fetchone()
-        if row is None: raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
+        if row is None:
+            raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
         check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
-        conn.execute("UPDATE cards SET title=?,description=?,labels=?,due_date=?,priority=?,updated_at=?,version=version+1 WHERE id=?",
-                     (fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], now_iso(), cid))
+        target_column = active_column(conn, target_column_id)
+        source_column_id = row["column_id"]
+        source_ids = _active_card_ids(conn, source_column_id, cid)
+        if source_column_id == target_column_id:
+            target_ids = source_ids
+            default_position = min(row["position"], len(target_ids))
+        else:
+            target_ids = _active_card_ids(conn, target_column_id, cid)
+            default_position = len(target_ids)
+        position = min(requested_position if requested_position is not None else default_position, len(target_ids))
+        target_ids.insert(position, cid)
+        _rewrite_positions(conn, source_column_id, target_ids if source_column_id == target_column_id else source_ids)
+        if source_column_id != target_column_id:
+            _rewrite_positions(conn, target_column_id, target_ids)
+        completed_at = row["completed_at"] if source_column_id == target_column_id else (now_iso() if is_completed_column(target_column) else None)
+        ts = now_iso()
+        conn.execute("""UPDATE cards SET column_id=?,position=?,title=?,description=?,labels=?,due_date=?,priority=?,completed_at=?,updated_at=?,version=version+1 WHERE id=?""",
+                     (target_column_id, position, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], completed_at, ts, cid))
         revision = bump_revision(conn)
     return {"card": get_card(conn, cid), "revision": revision}
 
@@ -494,7 +1002,7 @@ def update_card(conn, cid, data):
 def move_card(conn, cid, data):
     data = require_object(data); target = require_int(data.get("column_id"), "column_id", 1); position = require_int(data.get("position"), "position", 0)
     with transaction(conn):
-        row = conn.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=0", (cid,)).fetchone()
         if row is None: raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
         if row["archived"]: raise ApiError("归档卡片不能移动", 409, "CARD_ARCHIVED")
         check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision")); target_column = active_column(conn, target)
@@ -515,7 +1023,7 @@ def move_card(conn, cid, data):
 def archive_card(conn, cid, data=None):
     data = require_object(data or {})
     with transaction(conn):
-        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0", (cid,)).fetchone()
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
         if row is None: raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
         check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
         ts = now_iso()
@@ -527,13 +1035,17 @@ def archive_card(conn, cid, data=None):
 def restore_card(conn, cid, data=None):
     data = require_object(data or {})
     with transaction(conn):
-        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=1", (cid,)).fetchone()
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=1 AND is_draft=0", (cid,)).fetchone()
+
         if row is None: raise ApiError("归档卡片不存在", 404, "CARD_NOT_FOUND")
         check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
         target = data.get("target_column_id")
         target_row = None
         if target is not None:
+            target = require_int(target, "target_column_id", 1)
             target_row = conn.execute("SELECT * FROM columns WHERE id=? AND deleted_at IS NULL", (target,)).fetchone()
+            if target_row is None:
+                raise ApiError("指定的恢复列不存在或已删除", 404, "COLUMN_NOT_FOUND")
         else:
             target_row = conn.execute("SELECT * FROM columns WHERE id=? AND deleted_at IS NULL", (row["column_id"],)).fetchone()
             if target_row is None:
@@ -557,41 +1069,91 @@ def restore_card(conn, cid, data=None):
 def copy_card(conn, cid, data=None):
     data = require_object(data or {})
     with transaction(conn):
-        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0", (cid,)).fetchone()
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
         if row is None: raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
         check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
-        ids = _active_card_ids(conn, row["column_id"], cid); position = min(row["position"] + 1, len(ids)); ts = now_iso()
-        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at)
-                            VALUES (?,?,?,?,?,?,?,0,?,?)""", (row["column_id"], row["title"] + "（副本）", row["description"], row["labels"], row["due_date"], row["priority"], position, ts, ts))
-        ids.insert(position, cur.lastrowid); _rewrite_positions(conn, row["column_id"], ids); revision = bump_revision(conn)
-    return {"card": get_card(conn, cur.lastrowid), "revision": revision}
+        ids = _active_card_ids(conn, row["column_id"])
+        source_index = ids.index(cid)
+        position = source_index + 1
+        ts = now_iso()
+        column = active_column(conn, row["column_id"])
+        completed_at = ts if is_completed_column(column) else None
+        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at)
+                            VALUES (?,?,?,?,?,?,?,0,?,?,?)""", (row["column_id"], row["title"] + "（副本）", row["description"], row["labels"], row["due_date"], row["priority"], position, ts, ts, completed_at))
+        ids.insert(position, cur.lastrowid)
+        _rewrite_positions(conn, row["column_id"], ids)
+        revision = bump_revision(conn)
+    return {"card": get_card(conn, cur.lastrowid), "revision": revision, "attachments_copied": False}
 
 
-def search_cards(conn, q="", date_from=None, date_to=None, priority=None, include_active=False):
+def encode_search_cursor(updated_at, card_id):
+    raw = json.dumps([updated_at, card_id], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_search_cursor(value):
+    if not value:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        updated_at, card_id = json.loads(raw.decode("utf-8"))
+        require_string(updated_at, "cursor", 1, 30)
+        require_int(card_id, "cursor", 1)
+        return updated_at, card_id
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, ApiError):
+        raise ApiError("搜索游标无效，请重新搜索", 400, "INVALID_CURSOR")
+
+
+def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, cursor=None, limit=50):
     if date_from: validate_due_date(date_from)
     if date_to: validate_due_date(date_to)
     if priority: validate_priority(priority)
     sql = """SELECT cards.*,columns.name AS column_name,
+              (SELECT COUNT(*) FROM attachments WHERE attachments.card_id=cards.id) AS attachment_count,
               CASE WHEN columns.deleted_at IS NULL THEN 0 ELSE 1 END AS column_deleted,
               CASE WHEN columns.deleted_at IS NULL THEN columns.id ELSE
                   (SELECT matching.id FROM columns AS matching
                    WHERE matching.deleted_at IS NULL AND matching.name=columns.name
                    ORDER BY matching.position,matching.id LIMIT 1)
               END AS restore_column_id
-              FROM cards JOIN columns ON columns.id=cards.column_id WHERE 1=1"""
+              FROM cards JOIN columns ON columns.id=cards.column_id WHERE cards.is_draft=0"""
+
     params = []
     if not include_active: sql += " AND cards.archived=1"
-    if q: sql += " AND (cards.title LIKE ? OR cards.description LIKE ? OR cards.labels LIKE ?)"; params.extend(["%%%s%%" % q] * 3)
+    if q:
+        name_query = "%%%s%%" % attachment_name_key(q)
+        sql += """ AND (cards.title LIKE ? OR cards.description LIKE ? OR cards.labels LIKE ? OR EXISTS
+                             (SELECT 1 FROM attachments WHERE attachments.card_id=cards.id AND attachments.name_key LIKE ?))"""
+        params.extend(["%%%s%%" % q] * 3 + [name_query])
     if date_from: sql += " AND substr(cards.due_date,1,10)>=?"; params.append(date_from[:10])
     if date_to: sql += " AND substr(cards.due_date,1,10)<=?"; params.append(date_to[:10])
     if priority: sql += " AND cards.priority=?"; params.append(priority)
-    return [row_to_card(r) for r in conn.execute(sql + " ORDER BY cards.updated_at DESC,cards.id DESC LIMIT 1000", params)]
+    decoded = decode_search_cursor(cursor)
+    if decoded:
+        sql += " AND (cards.updated_at<? OR (cards.updated_at=? AND cards.id<?))"
+        params.extend([decoded[0], decoded[0], decoded[1]])
+    limit = min(max(int(limit), 1), 100)
+    rows = conn.execute(sql + " ORDER BY cards.updated_at DESC,cards.id DESC LIMIT ?", params + [limit + 1]).fetchall()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [row_to_card(r) for r in rows]
+    next_cursor = encode_search_cursor(rows[-1]["updated_at"], rows[-1]["id"]) if has_more and rows else None
+    return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
+
+
+def search_cards(conn, q="", date_from=None, date_to=None, priority=None, include_active=False):
+    return search_cards_page(conn, q, date_from, date_to, priority, include_active)["items"]
 
 
 def export_data(conn):
+    attachments = [dict(row) for row in conn.execute("""SELECT attachments.id,attachments.card_id,attachments.file_name,attachments.content_type,
+                 attachments.size,attachments.created_at,attachments.updated_at,attachments.version FROM attachments
+                 JOIN cards ON cards.id=attachments.card_id WHERE cards.is_draft=0 ORDER BY attachments.id""")]
+    for attachment in attachments:
+        attachment["file_included"] = False
     return {"format": "kanban-export", "format_version": EXPORT_VERSION, "schema_version": SCHEMA_VERSION,
             "board_revision": board_revision(conn), "exported_at": now_iso(), "columns": list_columns(conn, True),
-            "cards": list_cards(conn, archived=0) + list_cards(conn, archived=1)}
+            "cards": list_cards(conn, archived=0) + list_cards(conn, archived=1), "attachments": attachments}
 
 
 def normalize_import(data):
@@ -633,23 +1195,386 @@ def normalize_import(data):
 
 def import_preview(data):
     normalized = normalize_import(data)
-    return {"ok": True, "columns": len(normalized["columns"]), "cards": sum(not c["archived"] for c in normalized["cards"]), "archived_cards": sum(c["archived"] for c in normalized["cards"])}
+    ignored = len(data.get("attachments", [])) if isinstance(data, dict) and isinstance(data.get("attachments"), list) else 0
+    return {"ok": True, "columns": len(normalized["columns"]), "cards": sum(not c["archived"] for c in normalized["cards"]),
+            "archived_cards": sum(c["archived"] for c in normalized["cards"]), "attachments_ignored": ignored}
 
 
 def import_replace(conn, request):
     request = require_object(request); normalized = normalize_import(request.get("data"))
+    rollback_dir = ATTACHMENTS_DIR + ".import-rollback-" + uuid.uuid4().hex
+    backup = None
     with DB_MAINTENANCE_LOCK:
-        check_revision(conn, request.get("expected_board_revision")); backup = create_backup("pre-import")
-        with transaction(conn):
-            check_revision(conn, request.get("expected_board_revision")); conn.execute("DELETE FROM cards"); conn.execute("DELETE FROM columns")
-            for col in normalized["columns"]:
-                conn.execute("INSERT INTO columns (id,name,position,deleted_at,version) VALUES (?,?,?,?,?)", (col["id"], col["name"], col["position"], col["deleted_at"], col["version"]))
-            for card in normalized["cards"]:
-                conn.execute("""INSERT INTO cards (id,column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at,archived_at,archive_reason,version)
-                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (card["id"], card["column_id"], card["title"], card["description"], card["labels"], card["due_date"], card["priority"], card["position"], card["archived"], card["created_at"], card["updated_at"], card["completed_at"], card["archived_at"], card["archive_reason"], card["version"]))
-            revision = bump_revision(conn)
-            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None: raise ApiError("导入数据外键检查失败", 422, "INVALID_IMPORT_REFERENCE")
+        check_revision(conn, request.get("expected_board_revision")); backup = create_full_backup("pre-import")
+        if os.path.isdir(ATTACHMENTS_DIR): os.replace(ATTACHMENTS_DIR, rollback_dir)
+        os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+        try:
+            with transaction(conn):
+                check_revision(conn, request.get("expected_board_revision")); conn.execute("DELETE FROM cards"); conn.execute("DELETE FROM columns")
+                for col in normalized["columns"]:
+                    conn.execute("INSERT INTO columns (id,name,position,deleted_at,version) VALUES (?,?,?,?,?)", (col["id"], col["name"], col["position"], col["deleted_at"], col["version"]))
+                for card in normalized["cards"]:
+                    conn.execute("""INSERT INTO cards (id,column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at,archived_at,archive_reason,is_draft,version)
+                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""", (card["id"], card["column_id"], card["title"], card["description"], card["labels"], card["due_date"], card["priority"], card["position"], card["archived"], card["created_at"], card["updated_at"], card["completed_at"], card["archived_at"], card["archive_reason"], card["version"]))
+                revision = bump_revision(conn)
+                if conn.execute("PRAGMA foreign_key_check").fetchone() is not None: raise ApiError("导入数据外键检查失败", 422, "INVALID_IMPORT_REFERENCE")
+        except Exception:
+            shutil.rmtree(ATTACHMENTS_DIR, ignore_errors=True)
+            if os.path.isdir(rollback_dir): os.replace(rollback_dir, ATTACHMENTS_DIR)
+            raise
+        shutil.rmtree(rollback_dir, ignore_errors=True)
     return {"ok": True, "imported": import_preview(request.get("data")), "backup": os.path.basename(backup), "revision": revision}
+
+
+def _zip_attachment_manifest(rows):
+    result = []
+    missing = []
+    for row in rows:
+        path = attachment_path(row["card_id"], row["file_name"])
+        arcname = "attachments/%s/%s" % (row["card_id"], row["file_name"])
+        if not os.path.isfile(path):
+            missing.append(arcname)
+            continue
+        result.append({"path": arcname, "size": os.path.getsize(path), "sha256": sha256_file(path)})
+    return result, missing
+
+
+def create_full_backup(prefix="backup"):
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    with MAINTENANCE_GATE.exclusive(), DB_MAINTENANCE_LOCK:
+        db_snapshot = create_backup("snapshot")
+        final_path = os.path.join(BACKUP_DIR, "kanban-%s-%s.zip" % (prefix, datetime.now().strftime("%Y%m%d-%H%M%S-%f")))
+        fd, temp_path = tempfile.mkstemp(prefix=".kanban-full-", suffix=".tmp", dir=BACKUP_DIR)
+        os.close(fd)
+        try:
+            snapshot = get_conn(db_snapshot)
+            with transaction(snapshot):
+                snapshot.execute("DELETE FROM cards WHERE is_draft=1")
+            rows = snapshot.execute("""SELECT attachments.card_id,attachments.file_name,attachments.size FROM attachments
+                                     JOIN cards ON cards.id=attachments.card_id WHERE cards.is_draft=0 ORDER BY attachments.id""").fetchall()
+            snapshot.close()
+            attachment_manifest, missing = _zip_attachment_manifest(rows)
+            ensure_free_space(BACKUP_DIR, os.path.getsize(db_snapshot))
+            with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.write(db_snapshot, "kanban.db")
+                for item in attachment_manifest:
+                    card_id, file_name = item["path"].split("/", 2)[1:]
+                    archive.write(attachment_path(int(card_id), file_name), item["path"])
+                manifest = {"format": "kanban-full-backup", "format_version": 2, "schema_version": SCHEMA_VERSION,
+                            "created_at": now_iso(), "database": {"size": os.path.getsize(db_snapshot), "sha256": sha256_file(db_snapshot)},
+                            "attachment_count": len(rows), "attachment_size": sum(row["size"] for row in rows),
+                            "attachments": attachment_manifest, "missing_attachments": missing}
+                archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            os.replace(temp_path, final_path)
+            return final_path
+        finally:
+            for path in (db_snapshot, temp_path):
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
+
+def _safe_zip_entries(archive):
+    entries = archive.infolist()
+    if len(entries) > MAX_ZIP_ENTRIES:
+        raise ApiError("ZIP 文件条目过多", 413, "ZIP_TOO_MANY_ENTRIES")
+    expanded = sum(info.file_size for info in entries)
+    if MAX_ZIP_EXPANDED_BYTES and expanded > MAX_ZIP_EXPANDED_BYTES:
+        raise ApiError("ZIP 展开后内容过大", 413, "ZIP_EXPANDED_TOO_LARGE")
+    seen = set()
+    result = []
+    for info in entries:
+        name = info.filename
+        if not name or name.endswith("/"):
+            continue
+        if info.file_size and info.compress_size and info.file_size / max(info.compress_size, 1) > MAX_ZIP_RATIO:
+            raise ApiError("ZIP 压缩率异常，无法安全解压", 422, "ZIP_COMPRESSION_RATIO")
+        if "\\" in name or name.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", name):
+            raise ApiError("ZIP 中包含不安全路径", 422, "UNSAFE_ZIP_PATH")
+        parts = name.split("/")
+        if any(part in ("", ".", "..") for part in parts):
+            raise ApiError("ZIP 中包含不安全路径", 422, "UNSAFE_ZIP_PATH")
+        if (info.external_attr >> 16) & 0o170000 == 0o120000:
+            raise ApiError("ZIP 中不能包含符号链接", 422, "UNSAFE_ZIP_ENTRY")
+        key = name.casefold()
+        if key in seen:
+            raise ApiError("ZIP 中存在大小写冲突或重复文件", 422, "ZIP_NAME_CONFLICT")
+        seen.add(key)
+        result.append(info)
+    return result
+
+
+def validate_board_invariants(conn):
+    if conn.execute("SELECT 1 FROM cards WHERE is_draft=1 LIMIT 1").fetchone():
+        raise ApiError("备份中不能包含未完成草稿", 422, "INVALID_BACKUP_DRAFT")
+    if conn.execute("""SELECT 1 FROM cards JOIN columns ON columns.id=cards.column_id
+                     WHERE cards.archived=0 AND cards.is_draft=0 AND columns.deleted_at IS NOT NULL LIMIT 1""").fetchone():
+        raise ApiError("未归档卡片不能属于已删除列", 422, "INVALID_BOARD_STATE")
+    names = set()
+    for row in conn.execute("SELECT name FROM columns WHERE deleted_at IS NULL"):
+        key = row["name"].strip().casefold()
+        if key in names:
+            raise ApiError("活动列名称不能重复", 422, "DUPLICATE_COLUMN_NAME")
+        names.add(key)
+    for row in conn.execute("SELECT id,due_date,priority,created_at,updated_at,archived,archived_at,archive_reason FROM cards WHERE is_draft=0"):
+        validate_priority(row["priority"]); validate_due_date(row["due_date"])
+        try:
+            created = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S")
+            updated = datetime.strptime(row["updated_at"], "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            raise ApiError("卡片时间格式无效", 422, "INVALID_BOARD_TIMESTAMP", {"card_id": row["id"]})
+        if created > updated:
+            raise ApiError("卡片更新时间不能早于创建时间", 422, "INVALID_BOARD_TIMESTAMP", {"card_id": row["id"]})
+        if bool(row["archived"]) != bool(row["archived_at"]):
+            raise ApiError("卡片归档状态不一致", 422, "INVALID_ARCHIVE_STATE", {"card_id": row["id"]})
+        if row["archived"] and not row["archive_reason"]:
+            raise ApiError("归档卡片缺少归档原因", 422, "INVALID_ARCHIVE_STATE", {"card_id": row["id"]})
+    for column in conn.execute("SELECT id FROM columns"):
+        positions = [row[0] for row in conn.execute("SELECT position FROM cards WHERE column_id=? AND archived=0 AND is_draft=0 ORDER BY position,id", (column["id"],))]
+        if positions != list(range(len(positions))):
+            raise ApiError("卡片位置不连续", 422, "INVALID_CARD_POSITIONS", {"column_id": column["id"]})
+    state = conn.execute("SELECT revision FROM board_state WHERE id=1").fetchone()
+    if state is None or not isinstance(state["revision"], int) or state["revision"] < 1:
+        raise ApiError("看板版本状态无效", 422, "INVALID_BOARD_STATE")
+
+
+def inspect_full_backup(path, extract=False):
+    extract_dir = tempfile.mkdtemp(prefix="kanban-restore-", dir=BACKUP_DIR) if extract else None
+    db_path = None
+    try:
+        try:
+            archive = zipfile.ZipFile(path, "r")
+        except (zipfile.BadZipFile, OSError):
+            raise ApiError("所选文件不是有效的完整看板备份", 422, "INVALID_BACKUP")
+        with archive:
+            entries = _safe_zip_entries(archive)
+            by_name = {info.filename: info for info in entries}
+            if "manifest.json" not in by_name or "kanban.db" not in by_name:
+                raise ApiError("ZIP 不是有效的完整看板备份", 422, "INVALID_BACKUP")
+            try:
+                manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, KeyError):
+                raise ApiError("备份清单格式无效", 422, "INVALID_BACKUP")
+            version = manifest.get("format_version")
+            if manifest.get("format") != "kanban-full-backup" or version not in (1, 2):
+                raise ApiError("不支持的完整备份格式", 422, "UNSUPPORTED_BACKUP_VERSION")
+            if manifest.get("missing_attachments"):
+                raise ApiError("备份包含缺失附件，不能直接恢复", 422, "INCOMPLETE_BACKUP", {"missing_attachments": manifest["missing_attachments"]})
+            fd, db_path = tempfile.mkstemp(prefix=".restore-check-", suffix=".db", dir=BACKUP_DIR)
+            os.close(fd)
+            with archive.open("kanban.db") as source, open(db_path, "wb") as output:
+                stream_copy_limited(source, output, by_name["kanban.db"].file_size, BACKUP_DIR)
+            if version == 2:
+                database = manifest.get("database") or {}
+                if database.get("size") != os.path.getsize(db_path) or database.get("sha256") != sha256_file(db_path):
+                    raise ApiError("备份数据库哈希校验失败", 422, "BACKUP_HASH_MISMATCH")
+        check = get_conn(db_path)
+        try:
+            if check.execute("PRAGMA quick_check").fetchone()[0] != "ok" or check.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ApiError("备份数据库完整性检查失败", 422, "INVALID_BACKUP_DATABASE")
+            if check.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                raise ApiError("备份数据库版本不受支持", 422, "UNSUPPORTED_BACKUP_SCHEMA")
+            validate_board_invariants(check)
+            attachment_rows = check.execute("""SELECT attachments.card_id,attachments.file_name,attachments.size FROM attachments
+                                             JOIN cards ON cards.id=attachments.card_id WHERE cards.is_draft=0 ORDER BY attachments.id""").fetchall()
+            expected = {"manifest.json", "kanban.db"}
+            manifest_items = {item.get("path"): item for item in manifest.get("attachments", [])} if version == 2 else {}
+            with zipfile.ZipFile(path, "r") as content_archive:
+                for row in attachment_rows:
+                    validate_attachment_name(row["file_name"])
+                    arcname = "attachments/%s/%s" % (row["card_id"], row["file_name"])
+                    expected.add(arcname)
+                    info = by_name.get(arcname)
+                    if info is None or info.file_size != row["size"]:
+                        raise ApiError("备份附件与数据库记录不一致", 422, "INVALID_BACKUP_ATTACHMENT")
+                    digest = hashlib.sha256()
+                    if extract:
+                        target = os.path.abspath(os.path.join(extract_dir, *arcname.split("/")))
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with content_archive.open(info) as source, open(target, "wb") as output:
+                            stream_copy_limited(source, output, info.file_size, extract_dir, digest)
+                    elif version == 2:
+                        with content_archive.open(info) as source:
+                            while True:
+                                chunk = source.read(65536)
+                                if not chunk:
+                                    break
+                                digest.update(chunk)
+                    if version == 2:
+                        item = manifest_items.get(arcname)
+                        if not item or item.get("size") != row["size"] or item.get("sha256") != digest.hexdigest():
+                            raise ApiError("备份附件哈希校验失败", 422, "BACKUP_HASH_MISMATCH", {"path": arcname})
+            extras = set(by_name) - expected
+            if extras:
+                raise ApiError("备份中包含未登记文件", 422, "UNEXPECTED_BACKUP_ENTRY", {"entries": sorted(extras)[:20]})
+            columns = check.execute("SELECT COUNT(*) FROM columns WHERE deleted_at IS NULL").fetchone()[0]
+            active = check.execute("SELECT COUNT(*) FROM cards WHERE archived=0 AND is_draft=0").fetchone()[0]
+            archived = check.execute("SELECT COUNT(*) FROM cards WHERE archived=1 AND is_draft=0").fetchone()[0]
+        finally:
+            check.close()
+        if extract:
+            target_db = os.path.join(extract_dir, "kanban.db")
+            os.replace(db_path, target_db)
+            db_path = target_db
+        preview = {"ok": True, "created_at": manifest.get("created_at"), "columns": columns, "cards": active,
+                   "archived_cards": archived, "attachments": len(attachment_rows),
+                   "attachment_size": sum(row["size"] for row in attachment_rows), "format_version": version,
+                   "hash_verified": version == 2}
+        return preview, extract_dir
+    except Exception:
+        if extract_dir:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        raise
+    finally:
+        if db_path and (not extract or not extract_dir or not db_path.startswith(extract_dir)):
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+
+
+def cleanup_restore_tokens():
+    cutoff = datetime.now().timestamp() - RESTORE_TOKEN_TTL
+    with RESTORE_TOKEN_LOCK:
+        expired = [(token, item) for token, item in RESTORE_TOKENS.items() if item["created"] < cutoff and not item.get("claimed")]
+        for token, _ in expired:
+            RESTORE_TOKENS.pop(token, None)
+    for _, item in expired:
+        try:
+            os.remove(item["path"])
+        except OSError:
+            pass
+
+
+def stage_full_backup(input_stream, content_length):
+    cleanup_restore_tokens()
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    ensure_free_space(BACKUP_DIR, min(content_length, 65536))
+    fd, path = tempfile.mkstemp(prefix=".restore-upload-", suffix=".zip", dir=BACKUP_DIR)
+    os.close(fd)
+    try:
+        with open(path, "wb") as output:
+            stream_copy_limited(input_stream, output, content_length, BACKUP_DIR)
+        preview, _ = inspect_full_backup(path)
+        token = uuid.uuid4().hex
+        with RESTORE_TOKEN_LOCK:
+            RESTORE_TOKENS[token] = {"path": path, "created": datetime.now().timestamp(), "claimed": False}
+        return {**preview, "token": token}
+    except Exception:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+
+
+def _claim_restore_token(token):
+    cleanup_restore_tokens()
+    with RESTORE_TOKEN_LOCK:
+        item = RESTORE_TOKENS.get(token)
+        if item is None or item.get("claimed"):
+            raise ApiError("恢复预览已过期或已使用，请重新选择 ZIP", 404, "RESTORE_TOKEN_EXPIRED")
+        item["claimed"] = True
+        return dict(item)
+
+
+def _move_if_exists(source, target):
+    if os.path.exists(source):
+        os.replace(source, target)
+        return True
+    return False
+
+
+def restore_full_backup(conn, token, expected_revision):
+    item = _claim_restore_token(token)
+    preview, extracted = inspect_full_backup(item["path"], extract=True)
+    operation = uuid.uuid4().hex
+    rollback_db = DB_PATH + ".restore-rollback-" + operation
+    rollback_wal = rollback_db + "-wal"
+    rollback_shm = rollback_db + "-shm"
+    rollback_dir = ATTACHMENTS_DIR + ".restore-rollback-" + operation
+    new_db = os.path.join(extracted, "kanban.db")
+    new_dir = os.path.join(extracted, "attachments")
+    os.makedirs(new_dir, exist_ok=True)
+    backup = None
+    moved = {"db": False, "wal": False, "shm": False, "attachments": False}
+    try:
+        with MAINTENANCE_GATE.exclusive(), DB_MAINTENANCE_LOCK:
+            check_revision(conn, expected_revision)
+            old_revision = board_revision(conn)
+            backup = create_full_backup("pre-restore")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.close()
+            moved["db"] = _move_if_exists(DB_PATH, rollback_db)
+            moved["wal"] = _move_if_exists(DB_PATH + "-wal", rollback_wal)
+            moved["shm"] = _move_if_exists(DB_PATH + "-shm", rollback_shm)
+            moved["attachments"] = _move_if_exists(ATTACHMENTS_DIR, rollback_dir)
+            try:
+                os.replace(new_db, DB_PATH)
+                os.replace(new_dir, ATTACHMENTS_DIR)
+                restored = get_conn()
+                try:
+                    validate_board_invariants(restored)
+                    if restored.execute("PRAGMA quick_check").fetchone()[0] != "ok" or restored.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                        raise ApiError("恢复后数据库完整性检查失败", 500, "RESTORE_FAILED")
+                    restored_revision = board_revision(restored)
+                    with transaction(restored):
+                        restored.execute("UPDATE board_state SET revision=?,updated_at=? WHERE id=1", (max(old_revision, restored_revision) + 1, now_iso()))
+                    new_revision = board_revision(restored)
+                finally:
+                    restored.close()
+            except Exception:
+                for path in (DB_PATH + "-wal", DB_PATH + "-shm"):
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except OSError:
+                        pass
+                shutil.rmtree(ATTACHMENTS_DIR, ignore_errors=True)
+                try:
+                    if os.path.isfile(DB_PATH):
+                        os.remove(DB_PATH)
+                except OSError:
+                    pass
+                if moved["db"]:
+                    os.replace(rollback_db, DB_PATH)
+                if moved["wal"]:
+                    os.replace(rollback_wal, DB_PATH + "-wal")
+                if moved["shm"]:
+                    os.replace(rollback_shm, DB_PATH + "-shm")
+                if moved["attachments"]:
+                    os.replace(rollback_dir, ATTACHMENTS_DIR)
+                verify = get_conn()
+                try:
+                    if verify.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                        raise RuntimeError("恢复失败且原数据库回滚检查失败")
+                finally:
+                    verify.close()
+                raise
+            for path in (rollback_db, rollback_wal, rollback_shm):
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                except OSError:
+                    MAINTENANCE_REPORT["cleanup"].append(path)
+            shutil.rmtree(rollback_dir, ignore_errors=True)
+        with RESTORE_TOKEN_LOCK:
+            RESTORE_TOKENS.pop(token, None)
+        try:
+            os.remove(item["path"])
+        except OSError:
+            pass
+        return {"ok": True, "preview": preview, "backup": os.path.basename(backup), "revision": new_revision}
+    except Exception:
+        with RESTORE_TOKEN_LOCK:
+            current = RESTORE_TOKENS.get(token)
+            if current:
+                current["claimed"] = False
+        raise
+    finally:
+        shutil.rmtree(extracted, ignore_errors=True)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -690,18 +1615,35 @@ class Handler(BaseHTTPRequestHandler):
         ctype = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml"}.get(os.path.splitext(file_path)[1].lower(), "application/octet-stream")
         with open(file_path, "rb") as handle: self._send_text(handle.read(), content_type=ctype)
 
+    def _send_attachment(self, row):
+        path = attachment_path(row["card_id"], row["file_name"])
+        if not os.path.isfile(path):
+            raise ApiError("附件文件已不存在", 404, "ATTACHMENT_FILE_MISSING")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(os.path.getsize(path)))
+        self.send_header("Content-Disposition", "attachment; filename*=UTF-8''%s" % quote(row["file_name"]))
+        self._security_headers(); self.end_headers()
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(65536)
+                if not chunk: break
+                self.wfile.write(chunk)
+
     def _send_backup(self):
-        with DB_MAINTENANCE_LOCK: path = create_backup("download")
+        zip_path = create_full_backup("download")
         try:
-            filename = "kanban-backup-%s.db" % datetime.now().strftime("%Y%m%d-%H%M%S"); self.send_response(200)
-            self.send_header("Content-Type", "application/vnd.sqlite3"); self.send_header("Content-Length", str(os.path.getsize(path))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename); self._security_headers(); self.end_headers()
-            with open(path, "rb") as handle:
+            filename = "kanban-backup-%s.zip" % datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.send_response(200); self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(os.path.getsize(zip_path))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename)
+            self._security_headers(); self.end_headers()
+            with open(zip_path, "rb") as handle:
                 while True:
                     chunk = handle.read(65536)
                     if not chunk: break
                     self.wfile.write(chunk)
         finally:
-            try: os.remove(path)
+            try: os.remove(zip_path)
             except OSError: pass
 
     def _route(self, method):
@@ -716,8 +1658,20 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as error: self.log_error("internal error: %r", error); self._send_error(ApiError("服务器内部错误", 500, "INTERNAL_ERROR"))
 
     def _route_api(self, method, path, query):
-        conn = get_conn()
-        try:
+        mutation = method in ("POST", "PUT", "DELETE")
+        maintenance = path in ("/api/import", "/api/import/zip", "/api/backup")
+        gate = MAINTENANCE_GATE.exclusive() if maintenance else MAINTENANCE_GATE.shared()
+        with gate:
+            conn = get_conn()
+            try:
+                self._dispatch_api(conn, method, path, query, mutation)
+            finally:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+
+    def _dispatch_api(self, conn, method, path, query, mutation=False):
             if path == "/api/board" and method == "GET": return self._send_json(get_board(conn))
             if path == "/api/columns" and method == "GET": return self._send_json(list_columns(conn))
             if path == "/api/columns" and method == "POST": return self._send_json(create_column(conn, self._read_json_body()), 201)
@@ -732,24 +1686,63 @@ class Handler(BaseHTTPRequestHandler):
                 if raw is not None and not raw.isdigit(): fail("column_id 无效", field="column_id")
                 return self._send_json(list_cards(conn, int(raw) if raw is not None else None))
             if path == "/api/cards" and method == "POST": return self._send_json(create_card(conn, self._read_json_body()), 201)
+            if path == "/api/cards/drafts" and method == "POST": return self._send_json(create_card_draft(conn, self._read_json_body()), 201)
             match = re.fullmatch(r"/api/cards/(\d+)", path)
             if match:
                 cid = int(match.group(1))
                 if method == "GET": return self._send_json(get_card(conn, cid))
                 if method == "PUT": return self._send_json(update_card(conn, cid, self._read_json_body()))
                 if method == "DELETE": return self._send_json(archive_card(conn, cid, self._read_json_body() if int(self.headers.get("Content-Length", "0")) else {}))
-            for suffix, action, verb in (("move", move_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST")):
+            for suffix, action, verb in (("move", move_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST"), ("finalize", finalize_card_draft, "PUT")):
                 match = re.fullmatch(r"/api/cards/(\d+)/%s" % suffix, path)
                 if match and method == verb: return self._send_json(action(conn, int(match.group(1)), self._read_json_body()))
-            if path == "/api/search" and method == "GET": return self._send_json(search_cards(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true")))
+            match = re.fullmatch(r"/api/cards/(\d+)/draft", path)
+            if match and method == "DELETE":
+                header = self.headers.get("X-Card-Version")
+                if not header or not header.isdigit(): raise ApiError("草稿版本无效", 400, "INVALID_VERSION")
+                return self._send_json(delete_card_draft(conn, int(match.group(1)), int(header)))
+            match = re.fullmatch(r"/api/cards/(\d+)/attachments", path)
+            if match:
+                card_id = int(match.group(1))
+                if method == "GET": return self._send_json(list_attachments(conn, card_id))
+                if method == "POST":
+                    try: length = int(self.headers.get("Content-Length", "0"))
+                    except ValueError: raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
+                    if length < 0: raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
+                    encoded_name = self.headers.get("X-File-Name", "")
+                    try: file_name = unquote(encoded_name, encoding="utf-8", errors="strict")
+                    except UnicodeDecodeError: raise ApiError("文件名编码无效", 400, "INVALID_FILE_NAME")
+                    replace = query.get("replace", ["0"])[0] in ("1", "true")
+                    version_header = self.headers.get("X-Attachment-Version")
+                    if replace and (not version_header or not version_header.isdigit()): raise ApiError("覆盖附件需要有效版本", 400, "INVALID_VERSION")
+                    expected_version = int(version_header) if version_header and version_header.isdigit() else None
+                    attachment = save_attachment(conn, card_id, file_name, self.headers.get("X-File-Type", ""), self.rfile, length, replace, expected_version)
+                    return self._send_json(attachment, 200 if replace else 201)
+            match = re.fullmatch(r"/api/attachments/(\d+)(?:/(download))?", path)
+            if match:
+                attachment_id = int(match.group(1))
+                if method == "GET" and match.group(2) == "download": return self._send_attachment(get_attachment(conn, attachment_id))
+                if method == "DELETE":
+                    version_header = self.headers.get("X-Attachment-Version")
+                    if not version_header or not version_header.isdigit(): raise ApiError("附件版本无效", 400, "INVALID_VERSION")
+                    return self._send_json(delete_attachment(conn, attachment_id, int(version_header)))
+            if path == "/api/search" and method == "GET":
+                return self._send_json(search_cards_page(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true"), query.get("cursor", [None])[0], query.get("limit", [50])[0]))
             if path == "/api/export" and method == "GET":
                 body = json.dumps(export_data(conn), ensure_ascii=False, indent=2).encode("utf-8"); filename = "kanban-export-%s.json" % datetime.now().strftime("%Y%m%d-%H%M%S")
                 self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename); self._security_headers(); self.end_headers(); self.wfile.write(body); return
             if path == "/api/backup" and method == "GET": return self._send_backup()
+            if path == "/api/import/zip/preview" and method == "POST":
+                try: length = int(self.headers.get("Content-Length", "0"))
+                except ValueError: raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
+                if length <= 0: raise ApiError("ZIP 文件不能为空", 400, "INVALID_BACKUP")
+                return self._send_json(stage_full_backup(self.rfile, length))
+            if path == "/api/import/zip" and method == "POST":
+                request = self._read_json_body()
+                return self._send_json(restore_full_backup(conn, require_string(request.get("token"), "token", 1, 100), request.get("expected_board_revision")))
             if path == "/api/import/preview" and method == "POST": return self._send_json(import_preview(self._read_json_body(MAX_IMPORT_BODY)))
             if path == "/api/import" and method == "POST": return self._send_json(import_replace(conn, self._read_json_body(MAX_IMPORT_BODY)))
             raise ApiError("未知的 API 路径", 404, "NOT_FOUND")
-        finally: conn.close()
 
     def do_GET(self): self._route("GET")
     def do_POST(self): self._route("POST")
@@ -758,13 +1751,56 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self): self.send_response(204); self._security_headers(); self.end_headers()
 
 
+AUTO_ARCHIVE_STOP = threading.Event()
+
+
+def _require_external_tokens(method, path, data):
+    if method not in ("POST", "PUT", "DELETE"):
+        return
+    revision_optional = path.startswith("/api/cards/") and (path.endswith("/attachments") or "/draft" in path)
+    if not revision_optional and "expected_board_revision" not in data:
+        raise ApiError("缺少看板版本，请刷新后重试", 400, "INVALID_BOARD_REVISION")
+    existing_patterns = (r"/api/columns/\d+$", r"/api/cards/\d+$", r"/api/cards/\d+/(?:move|restore|copy)$")
+    if any(re.fullmatch(pattern, path) for pattern in existing_patterns) and "expected_version" not in data:
+        raise ApiError("缺少内容版本，请刷新后重试", 400, "INVALID_VERSION")
+
+
+def run_auto_archive_once(now=None):
+    with MAINTENANCE_GATE.shared():
+        conn = get_conn()
+        try:
+            return auto_archive_completed_cards(conn, now)
+        finally:
+            conn.close()
+
+
+def auto_archive_worker(interval=3600):
+    while not AUTO_ARCHIVE_STOP.wait(interval):
+        try:
+            run_auto_archive_once()
+        except Exception as error:
+            print("自动归档检查失败：%s" % error, file=sys.stderr)
+
+
+def start_auto_archive_worker(interval=3600):
+    AUTO_ARCHIVE_STOP.clear()
+    run_auto_archive_once()
+    thread = threading.Thread(target=auto_archive_worker, args=(interval,), daemon=True, name="kanban-auto-archive")
+    thread.start()
+    return thread
+
+
 def main():
-    init_db(); server = ThreadingHTTPServer((HOST, PORT), Handler)
+    init_db(); start_auto_archive_worker(); server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("=" * 60); print("  看板系统已启动"); print("  访问地址: http://%s:%d" % (HOST, PORT))
     if HOST not in ("127.0.0.1", "localhost", "::1"): print("  警告：服务已开放给其他设备，当前系统没有登录认证。")
     print("  数据库: %s" % DB_PATH); print("  按 Ctrl+C 停止"); print("=" * 60)
     try: server.serve_forever()
-    except KeyboardInterrupt: print("\n正在停止..."); server.shutdown()
+    except KeyboardInterrupt: print("\n正在停止...")
+    finally:
+        AUTO_ARCHIVE_STOP.set()
+        server.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__": main()

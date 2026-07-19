@@ -1,7 +1,10 @@
+import io
+import json
 import os
 import sqlite3
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime
 from unittest import mock
 
@@ -13,9 +16,11 @@ class DatabaseTestCase(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp.name, "test.db")
         self.backup_dir = os.path.join(self.temp.name, "backups")
+        self.attachments_dir = os.path.join(self.temp.name, "attachments")
         self.patches = [
             mock.patch.object(app, "DB_PATH", self.db_path),
             mock.patch.object(app, "BACKUP_DIR", self.backup_dir),
+            mock.patch.object(app, "ATTACHMENTS_DIR", self.attachments_dir),
         ]
         for patch in self.patches:
             patch.start()
@@ -41,9 +46,9 @@ class DatabaseTestCase(unittest.TestCase):
 
 class MigrationTests(DatabaseTestCase):
     def test_latest_schema_is_created(self):
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 4)
         self.assertEqual(len(app.list_columns(self.conn)), 3)
-        self.assertEqual(app.get_board(self.conn)["schema_version"], 3)
+        self.assertEqual(app.get_board(self.conn)["schema_version"], 4)
 
 
 class CardMovementTests(DatabaseTestCase):
@@ -70,7 +75,25 @@ class CardMovementTests(DatabaseTestCase):
         self.assertEqual([card["title"] for card in app.list_cards(self.conn, second["id"])], ["B"])
 
 
-class ColumnDeletionTests(DatabaseTestCase):
+    def test_atomic_update_moves_card_and_fields(self):
+        first, second = app.list_columns(self.conn)[:2]
+        card = self.create_card(first["id"], "旧标题")
+        result = app.update_card(self.conn, card["id"], {"column_id": second["id"], "position": 0, "title": "新标题", "description": "", "labels": "", "due_date": "", "priority": "high", "expected_version": card["version"], "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(result["card"]["column_id"], second["id"])
+        self.assertEqual(result["card"]["title"], "新标题")
+        self.assertEqual(result["card"]["position"], 0)
+
+    def test_copy_keeps_positions_and_completed_timer(self):
+        completed = next(column for column in app.list_columns(self.conn) if column["name"] == "已完成")
+        first = self.create_card(completed["id"], "A")
+        self.create_card(completed["id"], "B")
+        copied = app.copy_card(self.conn, first["id"], {"expected_version": first["version"], "expected_board_revision": app.board_revision(self.conn)})
+        cards = app.list_cards(self.conn, completed["id"])
+        self.assertEqual([card["position"] for card in cards], [0, 1, 2])
+        self.assertEqual(cards[1]["id"], copied["card"]["id"])
+        self.assertIsNotNone(copied["card"]["completed_at"])
+        self.assertFalse(copied["attachments_copied"])
+
     def test_delete_column_preserves_archived_card(self):
         columns = app.list_columns(self.conn)
         card = self.create_card(columns[0]["id"], "保留我")
@@ -233,6 +256,123 @@ class BackupImportTests(DatabaseTestCase):
         result = app.import_replace(self.conn, {"data": exported, "expected_board_revision": app.board_revision(self.conn)})
         self.assertTrue(result["ok"])
         self.assertEqual(app.list_cards(self.conn)[0]["title"], "往返")
+
+
+    def test_search_cursor_paginates_without_duplicates(self):
+        column = app.list_columns(self.conn)[0]
+        for index in range(5):
+            self.create_card(column["id"], f"分页 {index}")
+        first = app.search_cards_page(self.conn, include_active=True, limit=2)
+        second = app.search_cards_page(self.conn, include_active=True, cursor=first["next_cursor"], limit=2)
+        self.assertTrue(first["has_more"])
+        self.assertTrue(set(card["id"] for card in first["items"]).isdisjoint(card["id"] for card in second["items"]))
+
+    def test_attachment_name_utf8_byte_limit(self):
+        with self.assertRaises(app.ApiError) as raised:
+            app.validate_attachment_name("中" * 86)
+        self.assertEqual(raised.exception.code, "ATTACHMENT_NAME_TOO_LONG")
+
+    def test_backup_manifest_contains_hashes(self):
+        path = app.create_full_backup("hash")
+        with zipfile.ZipFile(path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual(manifest["format_version"], 2)
+        self.assertEqual(len(manifest["database"]["sha256"]), 64)
+
+
+class AttachmentTests(DatabaseTestCase):
+    def test_draft_is_hidden_and_finalize_preserves_attachment(self):
+        column = app.list_columns(self.conn)[0]
+        draft = app.create_card_draft(self.conn, {"column_id": column["id"], "expected_board_revision": app.board_revision(self.conn)})["card"]
+        self.assertEqual(app.list_cards(self.conn), [])
+        attachment = app.save_attachment(self.conn, draft["id"], "需求说明.docx", "application/octet-stream", io.BytesIO(b"draft"), 5)
+        finalized = app.finalize_card_draft(self.conn, draft["id"], {"column_id": column["id"], "title": "正式卡片", "description": "", "labels": "", "due_date": "", "priority": "medium", "expected_version": draft["version"], "expected_board_revision": app.board_revision(self.conn)})["card"]
+        self.assertEqual(finalized["attachment_count"], 1)
+        self.assertEqual(app.list_attachments(self.conn, finalized["id"])[0]["id"], attachment["id"])
+
+    def test_cancel_draft_removes_files(self):
+        column = app.list_columns(self.conn)[0]
+        draft = app.create_card_draft(self.conn, {"column_id": column["id"]})["card"]
+        app.save_attachment(self.conn, draft["id"], "x.bin", "", io.BytesIO(b"abc"), 3)
+        app.delete_card_draft(self.conn, draft["id"], draft["version"])
+        self.assertFalse(os.path.exists(app.attachment_directory(draft["id"])))
+        with self.assertRaises(app.ApiError):
+            app.get_card(self.conn, draft["id"], include_draft=True)
+
+    def test_filename_rules_and_casefold_duplicate(self):
+        for name in ("需求说明 v2.1.docx", "project.tar.gz", "a b.txt"):
+            self.assertEqual(app.validate_attachment_name(name), name)
+        for name in (".", "..", "bad/name", "bad\\name", "bad?.txt", "trail. ", "CON.txt", "bad\x00.txt"):
+            with self.assertRaises(app.ApiError, msg=name):
+                app.validate_attachment_name(name)
+        card = self.create_card(app.list_columns(self.conn)[0]["id"], "附件")
+        app.save_attachment(self.conn, card["id"], "Report.xlsx", "", io.BytesIO(b"one"), 3)
+        with self.assertRaises(app.ApiError) as raised:
+            app.save_attachment(self.conn, card["id"], "report.xlsx", "", io.BytesIO(b"two"), 3)
+        self.assertEqual(raised.exception.code, "ATTACHMENT_EXISTS")
+
+    def test_upload_replace_delete_search_and_archive(self):
+        card = self.create_card(app.list_columns(self.conn)[0]["id"], "附件测试")
+        first = app.save_attachment(self.conn, card["id"], "Annual-Report.xlsx", "sheet", io.BytesIO(b"old"), 3)
+        self.assertEqual(app.get_card(self.conn, card["id"])["attachment_count"], 1)
+        replaced = app.save_attachment(self.conn, card["id"], "annual-report.xlsx", "sheet", io.BytesIO(b"new-data"), 8, True, first["version"])
+        self.assertEqual(replaced["id"], first["id"])
+        self.assertEqual(replaced["version"], 2)
+        with open(app.attachment_path(card["id"], replaced["file_name"]), "rb") as handle:
+            self.assertEqual(handle.read(), b"new-data")
+        app.archive_card(self.conn, card["id"])
+        self.assertEqual(app.search_cards(self.conn, q="REPORT")[0]["id"], card["id"])
+        with self.assertRaises(app.ApiError):
+            app.delete_attachment(self.conn, replaced["id"], replaced["version"])
+        restored = app.restore_card(self.conn, card["id"])["card"]
+        self.assertEqual(restored["attachment_count"], 1)
+        app.delete_attachment(self.conn, replaced["id"], replaced["version"])
+        self.assertEqual(app.get_card(self.conn, card["id"])["attachment_count"], 0)
+
+    def test_post_commit_attachment_cleanup_failure_keeps_new_file(self):
+        card = self.create_card(app.list_columns(self.conn)[0]["id"], "清理失败")
+        original = app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"old"), 3)
+        real_remove = os.remove
+        def fail_rollback(path):
+            if ".rollback-" in path:
+                raise PermissionError("locked")
+            return real_remove(path)
+        with mock.patch("app.os.remove", side_effect=fail_rollback):
+            replaced = app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"new"), 3, True, original["version"])
+        self.assertEqual(replaced["version"], 2)
+        with open(app.attachment_path(card["id"], "data.bin"), "rb") as handle:
+            self.assertEqual(handle.read(), b"new")
+
+    def test_post_commit_delete_cleanup_failure_does_not_restore_metadata(self):
+        card = self.create_card(app.list_columns(self.conn)[0]["id"], "删除清理")
+        attachment = app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"old"), 3)
+        real_remove = os.remove
+        def fail_trash(path):
+            if ".deleting-" in path:
+                raise PermissionError("locked")
+            return real_remove(path)
+        with mock.patch("app.os.remove", side_effect=fail_trash):
+            app.delete_attachment(self.conn, attachment["id"], attachment["version"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM attachments WHERE id=?", (attachment["id"],)).fetchone()[0], 0)
+        self.assertFalse(os.path.exists(app.attachment_path(card["id"], "data.bin")))
+
+    def test_json_export_metadata_and_full_backup(self):
+        card = self.create_card(app.list_columns(self.conn)[0]["id"], "备份")
+        app.save_attachment(self.conn, card["id"], "中文.txt", "text/plain", io.BytesIO("内容".encode()), len("内容".encode()))
+        exported = app.export_data(self.conn)
+        self.assertFalse(exported["attachments"][0]["file_included"])
+        path = app.create_full_backup("test")
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            self.assertIn("kanban.db", names)
+            self.assertIn("manifest.json", names)
+            self.assertIn("attachments/%s/中文.txt" % card["id"], names)
+            manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["attachment_count"], 1)
+        preview, extracted = app.inspect_full_backup(path, extract=True)
+        self.assertEqual(preview["attachments"], 1)
+        import shutil
+        shutil.rmtree(extracted)
 
 
 if __name__ == "__main__":

@@ -67,6 +67,7 @@ input, textarea, select { font-family: inherit; font-size: 14px; }
     white-space: nowrap;
 }
 .icon-btn:hover { background: rgba(255,255,255,.3); }
+.toolbar-icon-only { width: 34px; min-width: 34px; padding: 0; }
 .icon-btn.danger:hover { background: var(--danger-hover); }
 .add-btn { font-weight: 600; }
 
@@ -158,14 +159,14 @@ input, textarea, select { font-family: inherit; font-size: 14px; }
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: var(--primary);
-    border: 1px solid color-mix(in srgb, var(--primary) 24%, transparent);
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--primary) 7%, transparent);
+    color: var(--text-light);
+    border: none;
+    border-radius: 4px;
+    background: transparent;
     cursor: help;
 }
 .auto-archive-hint svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.auto-archive-hint:hover, .auto-archive-hint:focus-visible { background: color-mix(in srgb, var(--primary) 13%, transparent); }
+.auto-archive-hint:hover, .auto-archive-hint:focus-visible { color: var(--text); background: rgba(0,0,0,.1); }
 
 .column-actions button {
     background: transparent;
@@ -309,6 +310,10 @@ input, textarea, select { font-family: inherit; font-size: 14px; }
 .search-panel input[type=text] { flex: 1; min-width: 200px; }
 .search-panel label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-light); white-space: nowrap; }
 .search-panel label.checkbox { cursor: pointer; }
+.history-search-btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:42px; padding:0 18px; border:0; border-radius:999px; color:#fff; font-weight:600; letter-spacing:.02em; background:linear-gradient(135deg,var(--green),#087435); box-shadow:0 6px 16px rgba(8,116,53,.2); transition:transform .16s ease,box-shadow .16s ease,filter .16s ease; }
+.history-search-btn svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; }
+.history-search-btn:hover { transform:translateY(-1px); filter:brightness(1.06); box-shadow:0 8px 20px rgba(8,116,53,.27); }
+.history-search-btn:active { transform:translateY(0); box-shadow:0 3px 9px rgba(8,116,53,.2); }
 .search-meta { color: var(--text-light); margin-bottom: 12px; font-size: 13px; }
 .search-results { display: flex; flex-direction: column; gap: 8px; }
 .result-item {
@@ -338,7 +343,7 @@ input, textarea, select { font-family: inherit; font-size: 14px; }
 .result-actions button:hover { background: var(--primary-hover); }
 
 /* ============ 输入控件通用 ============ */
-input[type=text], input[type=date], textarea, select {
+input[type=text], input[type=date], input[type=time], textarea, select {
     width: 100%;
     padding: 8px 10px;
     border: 2px solid var(--border);
@@ -440,7 +445,7 @@ input[type=text], input[type=date], textarea, select {
 .editor ul, .editor ol { padding-left: 24px; margin: 4px 0; }
 .editor li { margin: 2px 0; }
 .editor a { color: var(--primary); }
-input[type=text]:focus, input[type=date]:focus, textarea:focus, select:focus {
+input[type=text]:focus, input[type=date]:focus, input[type=time]:focus, textarea:focus, select:focus {
     outline: none;
     border-color: var(--primary);
     background: #fff;
@@ -495,9 +500,39 @@ textarea { resize: vertical; }
 .modal-body .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-light); font-weight: 600; }
 .field-label { font-size: 13px; color: var(--text-light); font-weight: 600; }
 .label-inline { display: inline-flex; align-items: baseline; gap: 4px; }
-.due-inputs { display: flex; gap: 6px; }
-.due-inputs input[type=date] { flex: 1.4; }
-.due-inputs input[type=time] { flex: 1; }
+.due-inputs { display:flex; gap:10px; }
+.date-input-shell { position:relative; display:flex; align-items:center; min-width:0; flex:1; border:1px solid var(--border); border-radius:9px; background:#fafbfc; transition:border-color .15s,box-shadow .15s,background .15s; }
+.date-shell-calendar { flex:1.35; }
+.date-shell-time { flex:1; min-width:190px; }
+.date-picker-trigger { align-self:stretch; display:grid; place-items:center; flex:0 0 42px; padding:0; border:0; border-right:1px solid var(--border); border-radius:8px 0 0 8px; color:var(--text-light); background:color-mix(in srgb,var(--bg) 72%,#fff); cursor:pointer; }
+.date-picker-trigger svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.date-picker-trigger:hover { color:var(--primary); background:color-mix(in srgb,var(--primary) 8%,#fff); }
+.date-picker-trigger:focus-visible { position:relative; z-index:2; outline:2px solid var(--primary); outline-offset:-2px; }
+.date-input-shell:focus-within { border-color:var(--primary); background:#fff; box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 14%,transparent); }
+.date-input-shell .native-date-control { min-width:0; min-height:44px; padding:9px 10px; border:0; border-radius:0 8px 8px 0; background:transparent; box-shadow:none; color:var(--text); font:inherit; appearance:none; -webkit-appearance:none; }
+.date-shell-time .native-date-control { padding-right:10px; }
+.date-shell-calendar.has-date .native-date-control, .date-shell-time.has-time .native-date-control { padding-right:38px; }
+.date-input-shell .native-date-control:focus { border:0; background:transparent; box-shadow:none; }
+.date-input-shell .native-date-control::-webkit-calendar-picker-indicator { display:none; opacity:0; width:0; height:0; margin:0; padding:0; }
+.date-input-shell .native-date-control::-webkit-inner-spin-button { display:none; }
+.date-clear-btn, .time-clear-btn { position:absolute; right:6px; display:grid; place-items:center; width:26px; height:26px; padding:0; border:0; border-radius:50%; color:var(--text-light); background:transparent; font-size:19px; line-height:1; cursor:pointer; }
+.date-clear-btn:hover, .time-clear-btn:hover { color:var(--danger); background:color-mix(in srgb,var(--danger) 10%,transparent); }
+.date-clear-btn:focus-visible, .time-clear-btn:focus-visible { outline:2px solid var(--primary); outline-offset:1px; }
+.history-date-range { display:flex; align-items:center; gap:8px; padding:5px 8px; border:1px solid var(--border); border-radius:10px; background:color-mix(in srgb,#fff 88%,var(--bg)); }
+.search-panel .date-control { display:flex; flex-direction:row; align-items:center; gap:7px; margin:0; }
+.search-panel .date-control > span:first-child { font-size:12px; font-weight:600; color:var(--text-light); }
+.history-date-shell { position:relative; display:flex; align-items:center; min-width:0; border:1px solid var(--border); border-radius:7px; background:transparent; }
+.history-date-shell:focus-within { border-color:var(--primary); box-shadow:0 0 0 2px color-mix(in srgb,var(--primary) 18%,transparent); }
+.history-date-trigger { align-self:stretch; display:grid; place-items:center; flex:0 0 32px; padding:0; border:0; border-right:1px solid var(--border); border-radius:6px 0 0 6px; color:var(--text-light); background:color-mix(in srgb,var(--bg) 72%,#fff); cursor:pointer; }
+.history-date-trigger svg { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.history-date-trigger:hover { color:var(--primary); background:color-mix(in srgb,var(--primary) 8%,#fff); }
+.search-panel .date-control .history-date-shell input[type=date] { width:118px; min-height:34px; padding:5px 7px; border:0; border-radius:0 6px 6px 0; background:transparent; color:var(--text); appearance:none; -webkit-appearance:none; }
+.search-panel .date-control .history-date-shell.has-date input[type=date] { padding-right:31px; }
+.search-panel .date-control .history-date-shell input[type=date]:focus { border:0; background:transparent; box-shadow:none; }
+.history-date-shell input[type=date]::-webkit-calendar-picker-indicator { display:none; opacity:0; width:0; height:0; margin:0; padding:0; }
+.history-date-clear { position:absolute; right:3px; display:grid; place-items:center; width:25px; height:25px; padding:0; border:0; border-radius:50%; color:var(--text-light); background:transparent; font-size:18px; line-height:1; cursor:pointer; }
+.history-date-clear:hover { color:var(--danger); background:color-mix(in srgb,var(--danger) 10%,transparent); }
+.date-range-separator { color:var(--text-light); font-size:12px; }
 .move-controls { display: flex; flex-wrap: wrap; gap: 6px; }
 .move-controls .ghost { padding: 6px 10px; font-size: 12px; }
 .modal-body label small { font-weight: 400; color: var(--text-light); }
@@ -571,6 +606,12 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
     .modal, .modal.small { width: 100%; max-width: 100%; max-height: 100dvh; border-radius: 0; }
     .editor-toolbar button { width: 40px; min-width: 40px; height: 40px; }
     .due-inputs { flex-direction: column; }
+    .date-input-shell { flex-basis:auto; width:100%; }
+    .date-shell-time { min-width:0; }
+    .history-date-range { width:100%; display:grid; grid-template-columns:1fr auto 1fr; padding:8px; }
+    .search-panel .date-control { min-width:0; flex-direction:column; align-items:stretch; gap:4px; }
+    .search-panel .date-control .history-date-shell input[type=date] { width:100%; min-height:44px; }
+    .history-date-shell { width:100%; }
 }
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
@@ -703,12 +744,14 @@ button, input, textarea, select { color: var(--text); }
 .quick-card-form { border: 1px solid rgba(56,189,248,.18); background: rgba(20,35,56,.94); box-shadow: var(--shadow); }
 .add-column-btn { border: 1px dashed rgba(125,211,252,.24); border-radius: 12px; color: #8fb5cb; background: rgba(14,27,47,.48); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
 .add-column-btn:hover { color: #baf3ff; border-color: rgba(56,189,248,.48); background: rgba(14,165,233,.09); box-shadow: 0 0 24px rgba(56,189,248,.08); }
-.history-view { max-width: 1100px; margin: 0 auto; padding: 28px 22px; }
+.history-view { max-width: 1320px; margin: 0 auto; padding: 28px 22px; }
 .search-panel, .result-item {
     border: 1px solid rgba(148, 163, 184, .13); background: rgba(14, 27, 47, .82);
     box-shadow: var(--shadow); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
 }
-.search-panel { border-radius: 12px; }
+.search-panel { border-radius: 12px; flex-wrap:nowrap; }
+.search-panel > * { flex-shrink:0; }
+.search-panel input[type=text] { flex:1 1 260px; min-width:180px; }
 .result-item { border-radius: 9px; border-left-width: 3px; }
 .result-title { color: #edf6ff; }
 .result-desc, .result-meta, .search-meta { color: #8fa3bd; }
@@ -1474,5 +1517,62 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
     :root[data-theme="douban-modern"] .board-view, :root[data-theme="dark-tech"] .board-view, :root[data-theme="cloud-blue"] .board-view, :root[data-theme="aurora-blue"] .board-view { height:calc(100dvh - 104px); }
     :root[data-theme="office"] .board-view, :root[data-theme="navy-blue"] .board-view { height:calc(100dvh - 100px); }
 }
+
+.board-status { flex:0 0 100%; align-self:flex-start; padding:18px; border-radius:10px; text-align:center; color:var(--text-light); background:var(--col-bg); }
+.board-error { color:var(--danger); border:1px solid color-mix(in srgb,var(--danger) 30%,transparent); }
+.board-retry { margin-left:10px; }
+.choice-actions { justify-content:flex-end; gap:8px; }
+.filter-reorder-hint { flex:0 0 100%; padding:8px 12px; border-radius:8px; color:var(--text-light); background:color-mix(in srgb,var(--primary) 7%,transparent); font-size:13px; }
+.inline-error { padding:14px; border:1px solid color-mix(in srgb,var(--danger) 35%,transparent); border-radius:8px; color:var(--danger); background:color-mix(in srgb,var(--danger) 7%,transparent); }
+.search-load-more { display:block; margin:16px auto; min-width:140px; }
+.attachment-item, .history-attachment { background:var(--col-bg,#fff); color:var(--text); }
+.attachment-meta, .attachment-help { color:var(--text-light); }
+.danger-text { color:var(--danger); }
+
+/* ===== 附件 ===== */
+.attachment-field { gap:8px; }
+.attachment-help { color:var(--muted,#777); line-height:1.5; }
+.attachment-list, .attachment-queue, .history-attachments { display:grid; gap:8px; }
+.attachment-item, .history-attachment { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid var(--border,#ddd); border-radius:8px; background:var(--card,#fff); }
+.attachment-main { min-width:0; flex:1; }
+.attachment-name { font-weight:600; overflow-wrap:anywhere; }
+.attachment-meta { margin-top:3px; color:var(--muted,#777); font-size:.82rem; }
+.attachment-actions { display:flex; align-items:center; gap:6px; flex:0 0 auto; }
+.attachment-actions button, .history-attachment button { min-height:36px; }
+.attachment-missing { border-color:#d77; background:rgba(180,50,50,.08); }
+.danger-text { color:#b3261e; }
+.attachment-progress { height:6px; margin-top:7px; overflow:hidden; border-radius:999px; background:rgba(128,128,128,.2); }
+.attachment-progress span { display:block; height:100%; border-radius:inherit; background:var(--accent,#2f855a); transition:width .15s ease; }
+.attachment-add-btn { justify-self:start; }
+.card-attachment-count { white-space:nowrap; }
+.history-attachments { margin-top:8px; }
+.history-attachment { font-size:.88rem; }
+
+@media (max-width:720px) {
+    .attachment-item, .history-attachment { align-items:stretch; flex-direction:column; }
+    .attachment-actions { width:100%; justify-content:flex-end; }
+    .attachment-actions button, .history-attachment button { min-height:44px; }
+    .attachment-add-btn { width:100%; }
+}
+@media (prefers-reduced-motion:reduce) { .attachment-progress span { transition:none; } }
+
+/* 原生日期控件主题适配 */
+:root[data-theme="dark-tech"] .date-input-shell, :root[data-theme="dark-tech"] .history-date-range { border-color:rgba(148,163,184,.24); background:rgba(8,20,36,.72); }
+:root[data-theme="dark-tech"] .date-input-shell .native-date-control, :root[data-theme="dark-tech"] .date-control input[type=date] { color:#dce8f6; color-scheme:dark; }
+:root[data-theme="dark-tech"] .date-input-shell:focus-within { background:rgba(14,27,47,.95); }
+:root[data-theme="office"] .date-input-shell, :root[data-theme="office"] .history-date-range { border-color:#d9dde5; background:#f8f9fb; }
+:root[data-theme="cloud-blue"] .date-input-shell, :root[data-theme="cloud-blue"] .history-date-range { border-color:#d5e1ee; background:#f7fbff; }
+:root[data-theme="navy-blue"] .date-input-shell, :root[data-theme="navy-blue"] .history-date-range { border-color:#cfdae2; background:#fffdfa; }
+:root[data-theme="aurora-blue"] .date-input-shell, :root[data-theme="aurora-blue"] .history-date-range { border-color:#d5d9ef; background:#f8f8fe; }
+
+/* 历史搜索主操作在所有主题中保持统一的胶囊按钮结构，颜色沿用主题主色。 */
+.search-panel > .history-search-btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:42px; padding:0 18px; border-radius:999px; font-weight:600; }
+.search-panel > .history-search-btn svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; }
+:root[data-theme="dark-tech"] .search-panel > .history-search-btn { color:#03131d; background:linear-gradient(135deg,#a5f3fc,#38bdf8); }
+:root[data-theme="office"] .search-panel > .history-search-btn, :root[data-theme="cloud-blue"] .search-panel > .history-search-btn { color:#fff; background:linear-gradient(135deg,#3b82f6,#1d4ed8); }
+:root[data-theme="navy-blue"] .search-panel > .history-search-btn { color:#fff; background:linear-gradient(135deg,#315f82,#183b56); }
+:root[data-theme="aurora-blue"] .search-panel > .history-search-btn { color:#fff; background:linear-gradient(135deg,#3b5bdb,#7048e8); }
+@media (max-width:1100px) { .search-panel { flex-wrap:wrap; } }
+@media (max-width:720px) { .search-panel > .history-search-btn { width:100%; min-height:46px; } }
 
 [hidden] { display: none !important; }
