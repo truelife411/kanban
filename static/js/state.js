@@ -2,7 +2,12 @@ export const state = {
     columns: [],
     cards: [],
     revision: 1,
-    filters: { due: "all", priority: "all", labels: [] },
+    filters: {
+        due: "all",
+        priority: "all",
+        labels: [],
+    },
+    sortByColumn: {},
     quickCreate: { columnId: null, title: "", submitting: false },
     currentCardId: null,
     currentCardCol: null,
@@ -20,8 +25,11 @@ export const state = {
     searchAbort: null,
     searchCursor: null,
     searchParams: "",
+    historySort: "archived_desc",
 };
 
 export function hasActiveFilters() {
     return state.filters.due !== "all" || state.filters.priority !== "all" || state.filters.labels.length > 0;
 }
+
+export function isManualReorderDisabled() { return hasActiveFilters(); }

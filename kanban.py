@@ -29,12 +29,14 @@ DB_PATH = os.path.join(BASE_DIR, "kanban.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 ATTACHMENTS_DIR = os.path.join(BASE_DIR, "attachments")
-HOST = os.environ.get("KANBAN_HOST", "127.0.0.1")
+HOST = "127.0.0.1"
 PORT = int(os.environ.get("KANBAN_PORT", "8000"))
 SCHEMA_VERSION = 4
 EXPORT_VERSION = 2
 MAX_JSON_BODY = 1024 * 1024
 MAX_IMPORT_BODY = 10 * 1024 * 1024
+MAX_ATTACHMENT_BODY = int(os.environ.get("KANBAN_MAX_ATTACHMENT_BODY", str(100 * 1024 * 1024)))
+MAX_ZIP_BODY = int(os.environ.get("KANBAN_MAX_ZIP_BODY", str(1024 * 1024 * 1024)))
 VALID_PRIORITY = ("high", "medium", "low")
 MIN_FREE_BYTES = int(os.environ.get("KANBAN_MIN_FREE_BYTES", str(512 * 1024 * 1024)))
 MAX_ZIP_ENTRIES = int(os.environ.get("KANBAN_MAX_ZIP_ENTRIES", "100000"))
@@ -45,6 +47,8 @@ RESTORE_TOKEN_LOCK = threading.Lock()
 RESTORE_TOKEN_TTL = 60 * 60
 DRAFT_TTL = 24 * 60 * 60
 CLEANUP_AGE = 24 * 60 * 60
+MAX_DATABASE_BACKUPS = 10
+DATABASE_BACKUP_NAME = re.compile(r"^kanban-[A-Za-z0-9_-]+-(\d{8}-\d{6}-\d{6})\.db$")
 MAINTENANCE_REPORT = {"missing": [], "orphans": [], "size_mismatch": [], "cleanup": []}
 
 
@@ -156,6 +160,7 @@ def now_iso():
 def get_conn(path=None):
     conn = sqlite3.connect(path or DB_PATH, timeout=5.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    conn.create_function("column_name_key", 1, column_name_key)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
@@ -234,37 +239,82 @@ class SafeHtmlParser(HTMLParser):
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.output = []
+        self.root = []
+        self.stack = [(None, self.root)]
         self.blocked = 0
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
+        if self.blocked:
+            if tag in self.blocked_tags:
+                self.blocked += 1
+            return
         if tag in self.blocked_tags:
-            self.blocked += 1
-        elif not self.blocked and tag in self.allowed:
-            self.output.append("<%s>" % tag)
+            self.blocked = 1
+            return
+        if tag == "br":
+            self.stack[-1][1].append(("br", []))
+        elif tag in self.allowed or tag == "div":
+            node = (tag, [])
+            self.stack[-1][1].append(node)
+            self.stack.append(node)
 
     def handle_startendtag(self, tag, attrs):
-        if not self.blocked and tag.lower() == "br":
-            self.output.append("<br>")
+        self.handle_starttag(tag, attrs)
+        if tag.lower() != "br":
+            self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
         tag = tag.lower()
-        if tag in self.blocked_tags:
-            self.blocked = max(0, self.blocked - 1)
-        elif not self.blocked and tag in self.allowed and tag != "br":
-            self.output.append("</%s>" % tag)
+        if self.blocked:
+            if tag in self.blocked_tags:
+                self.blocked = max(0, self.blocked - 1)
+            return
+        if tag == "br" or (tag not in self.allowed and tag != "div"):
+            return
+        for index in range(len(self.stack) - 1, 0, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
 
     def handle_data(self, data):
         if not self.blocked:
-            self.output.append(escape(data, quote=False))
+            self.stack[-1][1].append(data)
+
+    @staticmethod
+    def _empty_block(children):
+        return not any(not isinstance(child, str) or child.strip() for child in children)
+
+    def _render(self, nodes, parent=None):
+        output = []
+        for node in nodes:
+            if isinstance(node, str):
+                output.append(escape(node, quote=False))
+                continue
+            tag, children = node
+            if tag == "br":
+                output.append("<br>")
+                continue
+            rendered = self._render(children, tag)
+            if tag == "div" and parent is not None:
+                output.append(rendered)
+                continue
+            normalized_tag = "p" if tag == "div" else tag
+            if normalized_tag == "p" and self._empty_block(children):
+                rendered = "<br>"
+            output.append("<%s>%s</%s>" % (normalized_tag, rendered, normalized_tag))
+        return "".join(output)
+
+    @property
+    def output(self):
+        return self._render(self.root)
 
 
 def sanitize_description(value):
     parser = SafeHtmlParser()
     parser.feed(require_string(value, "description", 0, 100000, trim=False))
     parser.close()
-    return "".join(parser.output).strip()
+    return parser.output.strip()
 
 
 def validate_attachment_name(value):
@@ -282,6 +332,10 @@ def validate_attachment_name(value):
     if stem in reserved:
         fail("文件名是系统保留名称，请重命名后再上传", field="file_name")
     return name
+
+
+def column_name_key(name):
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 def attachment_name_key(name):
@@ -482,6 +536,24 @@ def _column_exists(conn, table, name):
     return any(row["name"] == name for row in conn.execute("PRAGMA table_info(%s)" % table))
 
 
+def _rotate_database_backups():
+    try:
+        names = []
+        for name in os.listdir(BACKUP_DIR):
+            match = DATABASE_BACKUP_NAME.fullmatch(name)
+            if match and os.path.isfile(os.path.join(BACKUP_DIR, name)):
+                names.append((match.group(1), name))
+        names.sort()
+    except OSError as error:
+        sys.stderr.write("数据库备份清理失败：%s\n" % error)
+        return
+    for _, name in names[:-MAX_DATABASE_BACKUPS]:
+        try:
+            os.remove(os.path.join(BACKUP_DIR, name))
+        except OSError as error:
+            sys.stderr.write("数据库备份清理失败（%s）：%s\n" % (name, error))
+
+
 def create_backup(prefix="auto", required=True):
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
@@ -498,6 +570,8 @@ def create_backup(prefix="auto", required=True):
             target.close()
             source.close()
         os.replace(temp_path, final_path)
+        if prefix != "snapshot":
+            _rotate_database_backups()
         return final_path
     except Exception:
         try:
@@ -819,8 +893,8 @@ def active_column(conn, cid):
 
 
 def ensure_unique_column_name(conn, name, exclude_id=None):
-    sql = "SELECT 1 FROM columns WHERE deleted_at IS NULL AND name = ? COLLATE NOCASE"
-    params = [name]
+    sql = "SELECT 1 FROM columns WHERE deleted_at IS NULL AND column_name_key(name) = ?"
+    params = [column_name_key(name)]
     if exclude_id is not None:
         sql += " AND id <> ?"
         params.append(exclude_id)
@@ -831,7 +905,7 @@ def ensure_unique_column_name(conn, name, exclude_id=None):
 def create_column(conn, data):
     name = require_string(require_object(data).get("name"), "name", 1, 100)
     with transaction(conn):
-        check_revision(conn, data.get("expected_board_revision"))
+        check_revision(conn, data.get("expected_board_revision"), required=True)
         ensure_unique_column_name(conn, name)
         pos = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM columns WHERE deleted_at IS NULL").fetchone()[0]
         cur = conn.execute("INSERT INTO columns (name,position) VALUES (?,?)", (name, pos))
@@ -843,7 +917,7 @@ def update_column(conn, cid, data):
     name = require_string(require_object(data).get("name"), "name", 1, 100)
     with transaction(conn):
         row = active_column(conn, cid)
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
         ensure_unique_column_name(conn, name, cid)
         was_completed = is_completed_column(row)
         becomes_completed = name.strip() == "已完成"
@@ -869,7 +943,7 @@ def delete_column(conn, cid, data=None):
     data = require_object(data or {})
     with transaction(conn):
         row = active_column(conn, cid)
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
         if conn.execute("SELECT COUNT(*) FROM columns WHERE deleted_at IS NULL").fetchone()[0] <= 1:
             raise ApiError("不能删除最后一个列", 409, "LAST_ACTIVE_COLUMN")
         ts = now_iso()
@@ -891,7 +965,7 @@ def reorder_columns(conn, data):
     if len(ids) != len(set(ids)):
         fail("列 id 不能重复", field="ids")
     with transaction(conn):
-        check_revision(conn, data.get("expected_board_revision"))
+        check_revision(conn, data.get("expected_board_revision"), required=True)
         active_ids = [r["id"] for r in conn.execute("SELECT id FROM columns WHERE deleted_at IS NULL ORDER BY position,id")]
         if set(ids) != set(active_ids) or len(ids) != len(active_ids):
             fail("必须提交全部活跃列的完整顺序", field="ids")
@@ -905,7 +979,7 @@ def create_card_draft(conn, data):
     data = require_object(data)
     column_id = require_int(data.get("column_id"), "column_id", 1)
     with transaction(conn):
-        check_revision(conn, data.get("expected_board_revision"))
+        check_revision(conn, data.get("expected_board_revision"), required=True)
         active_column(conn, column_id)
         ts = now_iso()
         cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,is_draft)
@@ -920,7 +994,7 @@ def finalize_card_draft(conn, cid, data):
         row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=1", (cid,)).fetchone()
         if row is None:
             raise ApiError("草稿卡片不存在", 404, "DRAFT_NOT_FOUND")
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
         column = active_column(conn, column_id)
         position, ts = len(_active_card_ids(conn, column_id)), now_iso()
         completed_at = ts if is_completed_column(column) else None
@@ -935,7 +1009,7 @@ def delete_card_draft(conn, cid, expected_version=None):
         row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=1", (cid,)).fetchone()
         if row is None:
             raise ApiError("草稿卡片不存在", 404, "DRAFT_NOT_FOUND")
-        check_version(row, expected_version)
+        check_version(row, expected_version, required=True)
         directory = attachment_directory(cid)
         rollback = directory + ".draft-delete-" + uuid.uuid4().hex
         if os.path.isdir(directory):
@@ -954,7 +1028,7 @@ def delete_card_draft(conn, cid, expected_version=None):
 def create_card(conn, data):
     fields = normalize_card_fields(data); column_id = require_int(data.get("column_id"), "column_id", 1)
     with transaction(conn):
-        check_revision(conn, data.get("expected_board_revision")); column = active_column(conn, column_id)
+        check_revision(conn, data.get("expected_board_revision"), required=True); column = active_column(conn, column_id)
         position, ts = len(_active_card_ids(conn, column_id)), now_iso()
         completed_at = ts if is_completed_column(column) else None
         cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at)
@@ -976,7 +1050,7 @@ def update_card(conn, cid, data):
         row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
         if row is None:
             raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
         target_column = active_column(conn, target_column_id)
         source_column_id = row["column_id"]
         source_ids = _active_card_ids(conn, source_column_id, cid)
@@ -1005,7 +1079,7 @@ def move_card(conn, cid, data):
         row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=0", (cid,)).fetchone()
         if row is None: raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
         if row["archived"]: raise ApiError("归档卡片不能移动", 409, "CARD_ARCHIVED")
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision")); target_column = active_column(conn, target)
+        check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True); target_column = active_column(conn, target)
         source = row["column_id"]; source_ids = _active_card_ids(conn, source, cid)
         target_ids = source_ids if source == target else _active_card_ids(conn, target, cid)
         position = min(position, len(target_ids)); target_ids.insert(position, cid)
@@ -1025,7 +1099,7 @@ def archive_card(conn, cid, data=None):
     with transaction(conn):
         row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
         if row is None: raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
         ts = now_iso()
         conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='manual',updated_at=?,version=version+1 WHERE id=?", (ts, ts, cid))
         _rewrite_positions(conn, row["column_id"], _active_card_ids(conn, row["column_id"])); revision = bump_revision(conn)
@@ -1038,7 +1112,7 @@ def restore_card(conn, cid, data=None):
         row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=1 AND is_draft=0", (cid,)).fetchone()
 
         if row is None: raise ApiError("归档卡片不存在", 404, "CARD_NOT_FOUND")
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
         target = data.get("target_column_id")
         target_row = None
         if target is not None:
@@ -1052,8 +1126,8 @@ def restore_card(conn, cid, data=None):
                 original = conn.execute("SELECT name FROM columns WHERE id=?", (row["column_id"],)).fetchone()
                 if original is not None:
                     target_row = conn.execute(
-                        "SELECT * FROM columns WHERE deleted_at IS NULL AND name=? ORDER BY position,id LIMIT 1",
-                        (original["name"],),
+                        "SELECT * FROM columns WHERE deleted_at IS NULL AND column_name_key(name)=? ORDER BY position,id LIMIT 1",
+                        (column_name_key(original["name"]),),
                     ).fetchone()
         if target_row is None: target_row = conn.execute("SELECT * FROM columns WHERE deleted_at IS NULL ORDER BY position,id LIMIT 1").fetchone()
         if target_row is None: raise ApiError("没有可用列", 409, "NO_ACTIVE_COLUMN")
@@ -1071,7 +1145,7 @@ def copy_card(conn, cid, data=None):
     with transaction(conn):
         row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
         if row is None: raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
-        check_version(row, data.get("expected_version")); check_revision(conn, data.get("expected_board_revision"))
+        check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
         ids = _active_card_ids(conn, row["column_id"])
         source_index = ids.index(cid)
         position = source_index + 1
@@ -1086,34 +1160,50 @@ def copy_card(conn, cid, data=None):
     return {"card": get_card(conn, cur.lastrowid), "revision": revision, "attachments_copied": False}
 
 
-def encode_search_cursor(updated_at, card_id):
-    raw = json.dumps([updated_at, card_id], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+SEARCH_SORTS = {
+    "archived_desc": ("archived_at", "DESC"),
+    "archived_asc": ("archived_at", "ASC"),
+    "updated_desc": ("updated_at", "DESC"),
+    "updated_asc": ("updated_at", "ASC"),
+    "created_desc": ("created_at", "DESC"),
+    "created_asc": ("created_at", "ASC"),
+}
+
+
+def encode_search_cursor(sort, null_rank, value, card_id):
+    raw = json.dumps([1, sort, null_rank, value, card_id], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def decode_search_cursor(value):
+def decode_search_cursor(value, sort):
     if not value:
         return None
     try:
         raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-        updated_at, card_id = json.loads(raw.decode("utf-8"))
-        require_string(updated_at, "cursor", 1, 30)
+        version, cursor_sort, null_rank, field_value, card_id = json.loads(raw.decode("utf-8"))
+        if version != 1 or cursor_sort != sort or null_rank not in (0, 1):
+            raise ValueError
+        if not isinstance(field_value, str) or len(field_value) > 30:
+            raise ValueError
         require_int(card_id, "cursor", 1)
-        return updated_at, card_id
+        return null_rank, field_value, card_id
     except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, ApiError):
         raise ApiError("搜索游标无效，请重新搜索", 400, "INVALID_CURSOR")
 
 
-def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, cursor=None, limit=50):
+def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, cursor=None, limit=50, sort="archived_desc"):
     if date_from: validate_due_date(date_from)
     if date_to: validate_due_date(date_to)
     if priority: validate_priority(priority)
+    if sort not in SEARCH_SORTS:
+        raise ApiError("历史排序方式无效", 400, "INVALID_SORT")
+    sort_field, direction = SEARCH_SORTS[sort]
     sql = """SELECT cards.*,columns.name AS column_name,
               (SELECT COUNT(*) FROM attachments WHERE attachments.card_id=cards.id) AS attachment_count,
               CASE WHEN columns.deleted_at IS NULL THEN 0 ELSE 1 END AS column_deleted,
               CASE WHEN columns.deleted_at IS NULL THEN columns.id ELSE
                   (SELECT matching.id FROM columns AS matching
-                   WHERE matching.deleted_at IS NULL AND matching.name=columns.name
+                   WHERE matching.deleted_at IS NULL AND column_name_key(matching.name)=column_name_key(columns.name)
                    ORDER BY matching.position,matching.id LIMIT 1)
               END AS restore_column_id
               FROM cards JOIN columns ON columns.id=cards.column_id WHERE cards.is_draft=0"""
@@ -1128,21 +1218,32 @@ def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, i
     if date_from: sql += " AND substr(cards.due_date,1,10)>=?"; params.append(date_from[:10])
     if date_to: sql += " AND substr(cards.due_date,1,10)<=?"; params.append(date_to[:10])
     if priority: sql += " AND cards.priority=?"; params.append(priority)
-    decoded = decode_search_cursor(cursor)
+    decoded = decode_search_cursor(cursor, sort)
+    null_rank_sql = "CASE WHEN cards.%s IS NULL THEN 1 ELSE 0 END" % sort_field
+    value_sql = "COALESCE(cards.%s,'')" % sort_field
+    comparison = "<" if direction == "DESC" else ">"
     if decoded:
-        sql += " AND (cards.updated_at<? OR (cards.updated_at=? AND cards.id<?))"
-        params.extend([decoded[0], decoded[0], decoded[1]])
+        null_rank, field_value, card_id = decoded
+        sql += " AND (%s>? OR (%s=? AND (%s%s? OR (%s=? AND cards.id%s?))))" % (
+            null_rank_sql, null_rank_sql, value_sql, comparison, value_sql, comparison)
+        params.extend([null_rank, null_rank, field_value, field_value, card_id])
     limit = min(max(int(limit), 1), 100)
-    rows = conn.execute(sql + " ORDER BY cards.updated_at DESC,cards.id DESC LIMIT ?", params + [limit + 1]).fetchall()
+    order_sql = " ORDER BY %s ASC,cards.%s %s,cards.id %s LIMIT ?" % (null_rank_sql, sort_field, direction, direction)
+    rows = conn.execute(sql + order_sql, params + [limit + 1]).fetchall()
     has_more = len(rows) > limit
     rows = rows[:limit]
     items = [row_to_card(r) for r in rows]
-    next_cursor = encode_search_cursor(rows[-1]["updated_at"], rows[-1]["id"]) if has_more and rows else None
+    if has_more and rows:
+        last = rows[-1]
+        value = last[sort_field]
+        next_cursor = encode_search_cursor(sort, 1 if value is None else 0, value or "", last["id"])
+    else:
+        next_cursor = None
     return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
 
 
-def search_cards(conn, q="", date_from=None, date_to=None, priority=None, include_active=False):
-    return search_cards_page(conn, q, date_from, date_to, priority, include_active)["items"]
+def search_cards(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, sort="archived_desc"):
+    return search_cards_page(conn, q, date_from, date_to, priority, include_active, sort=sort)["items"]
 
 
 def export_data(conn):
@@ -1162,13 +1263,19 @@ def normalize_import(data):
         fail("不支持的导入格式或版本", code="UNSUPPORTED_IMPORT_VERSION")
     columns, cards = data.get("columns"), data.get("cards")
     if not isinstance(columns, list) or not isinstance(cards, list) or not columns: fail("导入文件必须包含非空 columns 和 cards 数组")
-    normalized_columns, column_ids = [], set()
+    normalized_columns, column_ids, active_name_keys = [], set(), set()
     for index, item in enumerate(columns):
         item = require_object(item); cid = require_int(item.get("id"), "columns.id", 1)
         if cid in column_ids: fail("列 id 重复")
         column_ids.add(cid); version = item.get("version", 1)
-        normalized_columns.append({"id": cid, "name": require_string(item.get("name"), "name", 1, 100), "position": index,
-                                   "deleted_at": item.get("deleted_at"), "version": version if isinstance(version, int) and version > 0 else 1})
+        column = {"id": cid, "name": require_string(item.get("name"), "name", 1, 100), "position": index,
+                  "deleted_at": item.get("deleted_at"), "version": version if isinstance(version, int) and version > 0 else 1}
+        if not column["deleted_at"]:
+            key = column_name_key(column["name"])
+            if key in active_name_keys:
+                raise ApiError("活动列名称不能重复", 422, "DUPLICATE_COLUMN_NAME")
+            active_name_keys.add(key)
+        normalized_columns.append(column)
     if not any(not c["deleted_at"] for c in normalized_columns): fail("导入文件至少需要一个活跃列")
     normalized_cards, card_ids, per_column = [], set(), {}
     for item in cards:
@@ -1205,12 +1312,12 @@ def import_replace(conn, request):
     rollback_dir = ATTACHMENTS_DIR + ".import-rollback-" + uuid.uuid4().hex
     backup = None
     with DB_MAINTENANCE_LOCK:
-        check_revision(conn, request.get("expected_board_revision")); backup = create_full_backup("pre-import")
+        check_revision(conn, request.get("expected_board_revision"), required=True); backup = create_full_backup("pre-import")
         if os.path.isdir(ATTACHMENTS_DIR): os.replace(ATTACHMENTS_DIR, rollback_dir)
         os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
         try:
             with transaction(conn):
-                check_revision(conn, request.get("expected_board_revision")); conn.execute("DELETE FROM cards"); conn.execute("DELETE FROM columns")
+                check_revision(conn, request.get("expected_board_revision"), required=True); conn.execute("DELETE FROM cards"); conn.execute("DELETE FROM columns")
                 for col in normalized["columns"]:
                     conn.execute("INSERT INTO columns (id,name,position,deleted_at,version) VALUES (?,?,?,?,?)", (col["id"], col["name"], col["position"], col["deleted_at"], col["version"]))
                 for card in normalized["cards"]:
@@ -1239,14 +1346,27 @@ def _zip_attachment_manifest(rows):
     return result, missing
 
 
+def backup_readiness(conn):
+    rows = conn.execute("""SELECT attachments.card_id,attachments.file_name,attachments.size FROM attachments
+                         JOIN cards ON cards.id=attachments.card_id WHERE cards.is_draft=0 ORDER BY attachments.id""").fetchall()
+    missing = []
+    for row in rows:
+        if not os.path.isfile(attachment_path(row["card_id"], row["file_name"])):
+            missing.append("attachments/%s/%s" % (row["card_id"], row["file_name"]))
+    if missing:
+        raise ApiError("完整备份所需附件缺失", 422, "INCOMPLETE_BACKUP", {"missing_attachments": missing})
+    return {"ok": True, "attachment_count": len(rows), "attachment_size": sum(row["size"] for row in rows)}
+
+
 def create_full_backup(prefix="backup"):
     os.makedirs(BACKUP_DIR, exist_ok=True)
     with MAINTENANCE_GATE.exclusive(), DB_MAINTENANCE_LOCK:
         db_snapshot = create_backup("snapshot")
         final_path = os.path.join(BACKUP_DIR, "kanban-%s-%s.zip" % (prefix, datetime.now().strftime("%Y%m%d-%H%M%S-%f")))
-        fd, temp_path = tempfile.mkstemp(prefix=".kanban-full-", suffix=".tmp", dir=BACKUP_DIR)
-        os.close(fd)
+        temp_path = None
         try:
+            fd, temp_path = tempfile.mkstemp(prefix=".kanban-full-", suffix=".tmp", dir=BACKUP_DIR)
+            os.close(fd)
             snapshot = get_conn(db_snapshot)
             with transaction(snapshot):
                 snapshot.execute("DELETE FROM cards WHERE is_draft=1")
@@ -1254,6 +1374,8 @@ def create_full_backup(prefix="backup"):
                                      JOIN cards ON cards.id=attachments.card_id WHERE cards.is_draft=0 ORDER BY attachments.id""").fetchall()
             snapshot.close()
             attachment_manifest, missing = _zip_attachment_manifest(rows)
+            if missing:
+                raise ApiError("完整备份所需附件缺失", 422, "INCOMPLETE_BACKUP", {"missing_attachments": missing})
             ensure_free_space(BACKUP_DIR, os.path.getsize(db_snapshot))
             with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as archive:
                 archive.write(db_snapshot, "kanban.db")
@@ -1270,7 +1392,7 @@ def create_full_backup(prefix="backup"):
         finally:
             for path in (db_snapshot, temp_path):
                 try:
-                    if os.path.isfile(path):
+                    if path and os.path.isfile(path):
                         os.remove(path)
                 except OSError:
                     pass
@@ -1314,7 +1436,7 @@ def validate_board_invariants(conn):
         raise ApiError("未归档卡片不能属于已删除列", 422, "INVALID_BOARD_STATE")
     names = set()
     for row in conn.execute("SELECT name FROM columns WHERE deleted_at IS NULL"):
-        key = row["name"].strip().casefold()
+        key = column_name_key(row["name"])
         if key in names:
             raise ApiError("活动列名称不能重复", 422, "DUPLICATE_COLUMN_NAME")
         names.add(key)
@@ -1502,7 +1624,7 @@ def restore_full_backup(conn, token, expected_revision):
     moved = {"db": False, "wal": False, "shm": False, "attachments": False}
     try:
         with MAINTENANCE_GATE.exclusive(), DB_MAINTENANCE_LOCK:
-            check_revision(conn, expected_revision)
+            check_revision(conn, expected_revision, required=True)
             old_revision = board_revision(conn)
             backup = create_full_backup("pre-restore")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -1583,7 +1705,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
     def _security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:")
 
     def _send_json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8"); self.send_response(status)
@@ -1598,14 +1720,32 @@ class Handler(BaseHTTPRequestHandler):
         body = data.encode("utf-8") if isinstance(data, str) else data; self.send_response(status)
         self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self._security_headers(); self.end_headers(); self.wfile.write(body)
 
+    def _content_length(self, maximum=None):
+        if self.headers.get_all("Transfer-Encoding"):
+            raise ApiError("不支持 Transfer-Encoding，请使用 Content-Length", 400, "TRANSFER_ENCODING_NOT_ALLOWED")
+        values = self.headers.get_all("Content-Length") or []
+        if not values:
+            raise ApiError("请求必须提供 Content-Length", 411, "CONTENT_LENGTH_REQUIRED")
+        if len(values) != 1 or not re.fullmatch(r"[0-9]+", values[0]):
+            raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
+        length = int(values[0])
+        if maximum is not None and length > maximum:
+            raise ApiError("请求体过大", 413, "PAYLOAD_TOO_LARGE")
+        return length
+
     def _read_json_body(self, maximum=MAX_JSON_BODY):
+        length = self._content_length(maximum)
         if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json": raise ApiError("请求必须使用 application/json", 415, "UNSUPPORTED_MEDIA_TYPE")
-        try: length = int(self.headers.get("Content-Length", "0"))
-        except ValueError: raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
-        if length <= 0: raise ApiError("请求体不能为空", 400, "INVALID_JSON")
-        if length > maximum: raise ApiError("请求体过大", 413, "PAYLOAD_TOO_LARGE")
-        try: value = json.loads(self.rfile.read(length).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError): raise ApiError("请求体不是有效 JSON", 400, "INVALID_JSON")
+        if length == 0: raise ApiError("请求体不能为空", 400, "INVALID_JSON")
+        try:
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ApiError("请求内容中断", 400, "UPLOAD_INTERRUPTED")
+            value = json.loads(raw.decode("utf-8"))
+        except ApiError:
+            raise
+        except (ValueError, UnicodeDecodeError):
+            raise ApiError("请求体不是有效 JSON", 400, "INVALID_JSON")
         return require_object(value)
 
     def _serve_static(self, rel_path):
@@ -1680,7 +1820,7 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 cid = int(match.group(1))
                 if method == "PUT": return self._send_json(update_column(conn, cid, self._read_json_body()))
-                if method == "DELETE": return self._send_json(delete_column(conn, cid, self._read_json_body() if int(self.headers.get("Content-Length", "0")) else {}))
+                if method == "DELETE": return self._send_json(delete_column(conn, cid, self._read_json_body()))
             if path == "/api/cards" and method == "GET":
                 raw = query.get("column_id", [None])[0]
                 if raw is not None and not raw.isdigit(): fail("column_id 无效", field="column_id")
@@ -1692,7 +1832,7 @@ class Handler(BaseHTTPRequestHandler):
                 cid = int(match.group(1))
                 if method == "GET": return self._send_json(get_card(conn, cid))
                 if method == "PUT": return self._send_json(update_card(conn, cid, self._read_json_body()))
-                if method == "DELETE": return self._send_json(archive_card(conn, cid, self._read_json_body() if int(self.headers.get("Content-Length", "0")) else {}))
+                if method == "DELETE": return self._send_json(archive_card(conn, cid, self._read_json_body()))
             for suffix, action, verb in (("move", move_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST"), ("finalize", finalize_card_draft, "PUT")):
                 match = re.fullmatch(r"/api/cards/(\d+)/%s" % suffix, path)
                 if match and method == verb: return self._send_json(action(conn, int(match.group(1)), self._read_json_body()))
@@ -1706,9 +1846,7 @@ class Handler(BaseHTTPRequestHandler):
                 card_id = int(match.group(1))
                 if method == "GET": return self._send_json(list_attachments(conn, card_id))
                 if method == "POST":
-                    try: length = int(self.headers.get("Content-Length", "0"))
-                    except ValueError: raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
-                    if length < 0: raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
+                    length = self._content_length(MAX_ATTACHMENT_BODY)
                     encoded_name = self.headers.get("X-File-Name", "")
                     try: file_name = unquote(encoded_name, encoding="utf-8", errors="strict")
                     except UnicodeDecodeError: raise ApiError("文件名编码无效", 400, "INVALID_FILE_NAME")
@@ -1727,15 +1865,15 @@ class Handler(BaseHTTPRequestHandler):
                     if not version_header or not version_header.isdigit(): raise ApiError("附件版本无效", 400, "INVALID_VERSION")
                     return self._send_json(delete_attachment(conn, attachment_id, int(version_header)))
             if path == "/api/search" and method == "GET":
-                return self._send_json(search_cards_page(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true"), query.get("cursor", [None])[0], query.get("limit", [50])[0]))
+                return self._send_json(search_cards_page(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true"), query.get("cursor", [None])[0], query.get("limit", [50])[0], query.get("sort", ["archived_desc"])[0]))
             if path == "/api/export" and method == "GET":
                 body = json.dumps(export_data(conn), ensure_ascii=False, indent=2).encode("utf-8"); filename = "kanban-export-%s.json" % datetime.now().strftime("%Y%m%d-%H%M%S")
                 self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename); self._security_headers(); self.end_headers(); self.wfile.write(body); return
+            if path == "/api/backup/check" and method == "GET": return self._send_json(backup_readiness(conn))
             if path == "/api/backup" and method == "GET": return self._send_backup()
             if path == "/api/import/zip/preview" and method == "POST":
-                try: length = int(self.headers.get("Content-Length", "0"))
-                except ValueError: raise ApiError("Content-Length 无效", 400, "INVALID_CONTENT_LENGTH")
-                if length <= 0: raise ApiError("ZIP 文件不能为空", 400, "INVALID_BACKUP")
+                length = self._content_length(MAX_ZIP_BODY)
+                if length == 0: raise ApiError("ZIP 文件不能为空", 400, "INVALID_BACKUP")
                 return self._send_json(stage_full_backup(self.rfile, length))
             if path == "/api/import/zip" and method == "POST":
                 request = self._read_json_body()
@@ -1744,25 +1882,51 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/import" and method == "POST": return self._send_json(import_replace(conn, self._read_json_body(MAX_IMPORT_BODY)))
             raise ApiError("未知的 API 路径", 404, "NOT_FOUND")
 
+    def _allowed_methods(self, path):
+        if path in ("/api/board", "/api/search", "/api/export", "/api/backup", "/api/backup/check"):
+            return "GET, OPTIONS"
+        if path == "/api/columns":
+            return "GET, POST, OPTIONS"
+        if path == "/api/columns/reorder":
+            return "POST, OPTIONS"
+        if re.fullmatch(r"/api/columns/\d+", path):
+            return "PUT, DELETE, OPTIONS"
+        if path == "/api/cards":
+            return "GET, POST, OPTIONS"
+        if path == "/api/cards/drafts":
+            return "POST, OPTIONS"
+        if re.fullmatch(r"/api/cards/\d+", path):
+            return "GET, PUT, DELETE, OPTIONS"
+        if re.fullmatch(r"/api/cards/\d+/(?:restore|copy)", path):
+            return "POST, OPTIONS"
+        if re.fullmatch(r"/api/cards/\d+/(?:move|finalize)", path):
+            return "PUT, OPTIONS"
+        if re.fullmatch(r"/api/cards/\d+/draft", path):
+            return "DELETE, OPTIONS"
+        if re.fullmatch(r"/api/cards/\d+/attachments", path):
+            return "GET, POST, OPTIONS"
+        if re.fullmatch(r"/api/attachments/\d+", path):
+            return "DELETE, OPTIONS"
+        if re.fullmatch(r"/api/attachments/\d+/download", path):
+            return "GET, OPTIONS"
+        if path in ("/api/import/zip/preview", "/api/import/zip", "/api/import/preview", "/api/import"):
+            return "POST, OPTIONS"
+        return "OPTIONS"
+
     def do_GET(self): self._route("GET")
     def do_POST(self): self._route("POST")
     def do_PUT(self): self._route("PUT")
     def do_DELETE(self): self._route("DELETE")
-    def do_OPTIONS(self): self.send_response(204); self._security_headers(); self.end_headers()
+    def do_OPTIONS(self):
+        path = urlparse(self.path).path
+        self.send_response(204)
+        self.send_header("Allow", self._allowed_methods(path))
+        self.send_header("Content-Length", "0")
+        self._security_headers()
+        self.end_headers()
 
 
 AUTO_ARCHIVE_STOP = threading.Event()
-
-
-def _require_external_tokens(method, path, data):
-    if method not in ("POST", "PUT", "DELETE"):
-        return
-    revision_optional = path.startswith("/api/cards/") and (path.endswith("/attachments") or "/draft" in path)
-    if not revision_optional and "expected_board_revision" not in data:
-        raise ApiError("缺少看板版本，请刷新后重试", 400, "INVALID_BOARD_REVISION")
-    existing_patterns = (r"/api/columns/\d+$", r"/api/cards/\d+$", r"/api/cards/\d+/(?:move|restore|copy)$")
-    if any(re.fullmatch(pattern, path) for pattern in existing_patterns) and "expected_version" not in data:
-        raise ApiError("缺少内容版本，请刷新后重试", 400, "INVALID_VERSION")
 
 
 def run_auto_archive_once(now=None):
@@ -1792,8 +1956,7 @@ def start_auto_archive_worker(interval=3600):
 
 def main():
     init_db(); start_auto_archive_worker(); server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print("=" * 60); print("  看板系统已启动"); print("  访问地址: http://%s:%d" % (HOST, PORT))
-    if HOST not in ("127.0.0.1", "localhost", "::1"): print("  警告：服务已开放给其他设备，当前系统没有登录认证。")
+    print("=" * 60); print("  看板系统已启动（仅限本机访问）"); print("  访问地址: http://127.0.0.1:%d" % PORT)
     print("  数据库: %s" % DB_PATH); print("  按 Ctrl+C 停止"); print("=" * 60)
     try: server.serve_forever()
     except KeyboardInterrupt: print("\n正在停止...")

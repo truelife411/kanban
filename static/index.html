@@ -3,16 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script>
-        (function () {
-            try {
-                var theme = localStorage.getItem("kanban-theme");
-                if (["douban-classic", "douban-modern", "dark-tech", "office", "cloud-blue", "navy-blue", "aurora-blue"].indexOf(theme) >= 0) {
-                    document.documentElement.setAttribute("data-theme", theme);
-                }
-            } catch (_) {}
-        }());
-    </script>
+    <script src="/static/theme-init.js"></script>
     <title>看板</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/style.css">
@@ -27,26 +18,24 @@
             </h1>
         </div>
         <div class="topbar-center view-tabs" role="tablist" aria-label="主要视图">
-            <button id="btn-board" class="nav-btn active" role="tab" aria-selected="true" aria-controls="view-board" tabindex="0" onclick="showView('board')">看板</button>
-            <button id="btn-history" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1" onclick="showView('history')">历史归档</button>
+            <button id="btn-board" data-view="board" class="nav-btn active" role="tab" aria-selected="true" aria-controls="view-board" tabindex="0">看板</button>
+            <button id="btn-history" data-view="history" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">历史归档</button>
         </div>
         <div class="topbar-right">
-            <button class="icon-btn toolbar-icon-only" title="导入 JSON 或完整备份" aria-label="导入 JSON 或完整备份" onclick="selectImportFile()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 14v5h14v-5"/></svg></button>
-            <button class="icon-btn toolbar-icon-only" title="导出 JSON（不含附件文件）" aria-label="导出 JSON（不含附件文件）" onclick="exportJson()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4-4m-4 4-4-4M5 14v5h14v-5"/></svg></button>
-            <button class="icon-btn toolbar-icon-only" title="完整备份（含附件）" aria-label="完整备份（含附件）" onclick="backupDb()"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></button>
+            <button id="import-button" class="icon-btn toolbar-icon-only" title="导入 JSON 或完整备份" aria-label="导入 JSON 或完整备份"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 14v5h14v-5"/></svg></button>
+            <button id="export-button" class="icon-btn toolbar-icon-only" title="导出 JSON（不含附件文件）" aria-label="导出 JSON（不含附件文件）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4-4m-4 4-4-4M5 14v5h14v-5"/></svg></button>
+            <button id="backup-button" class="icon-btn toolbar-icon-only" title="完整备份（含附件）" aria-label="完整备份（含附件）"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></button>
             <div class="theme-picker">
-                <button id="theme-button" class="icon-btn toolbar-icon-only" type="button" title="切换主题" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false" onclick="toggleThemeMenu(event)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18h1.2a2 2 0 0 0 0-4H12a1.5 1.5 0 0 1 0-3h3a6 6 0 0 0 0-12h-3Z"/><circle cx="7.5" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="9.5" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="14" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg></button>
+                <button id="theme-button" class="icon-btn toolbar-icon-only" type="button" title="切换主题" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18h1.2a2 2 0 0 0 0-4H12a1.5 1.5 0 0 1 0-3h3a6 6 0 0 0 0-12h-3Z"/><circle cx="7.5" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="9.5" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="14" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg></button>
                 <div id="theme-menu" class="theme-menu" role="menu" aria-label="选择主题" hidden>
-                    <button type="button" role="menuitemradio" data-theme-value="douban-classic" onclick="setTheme('douban-classic')"><span class="theme-swatch theme-swatch-classic"></span><span>经典豆瓣绿</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="douban-modern" onclick="setTheme('douban-modern')"><span class="theme-swatch theme-swatch-modern"></span><span>现代豆瓣绿</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="dark-tech" onclick="setTheme('dark-tech')"><span class="theme-swatch theme-swatch-dark"></span><span>深色科技</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="office" onclick="setTheme('office')"><span class="theme-swatch theme-swatch-office"></span><span>简约办公</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="cloud-blue" onclick="setTheme('cloud-blue')"><span class="theme-swatch theme-swatch-cloud"></span><span>云端蓝</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="navy-blue" onclick="setTheme('navy-blue')"><span class="theme-swatch theme-swatch-navy"></span><span>海军蓝</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="aurora-blue" onclick="setTheme('aurora-blue')"><span class="theme-swatch theme-swatch-aurora"></span><span>极光蓝紫</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="douban-classic"><span class="theme-swatch theme-swatch-classic"></span><span>豆瓣绿</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="dark-tech"><span class="theme-swatch theme-swatch-dark"></span><span>暗夜黑</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="office"><span class="theme-swatch theme-swatch-office"></span><span>简约灰</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="cloud-blue"><span class="theme-swatch theme-swatch-cloud"></span><span>云端蓝</span><span class="theme-check">✓</span></button>
+                    <button type="button" role="menuitemradio" data-theme-value="aurora-blue"><span class="theme-swatch theme-swatch-aurora"></span><span>极光紫</span><span class="theme-check">✓</span></button>
                 </div>
             </div>
-            <button class="icon-btn add-btn" title="新增列" onclick="addColumn()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增列</span></button>
+            <button id="add-column-button" class="icon-btn add-btn" title="新增列"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增列</span></button>
             <input id="import-file" type="file" accept="application/json,.json,application/zip,.zip" hidden>
         </div>
     </header>
@@ -57,8 +46,10 @@
             <div id="due-filters" class="filter-group" aria-label="日期范围"></div>
             <div id="priority-filters" class="filter-group priority-filter-group" aria-label="优先级"></div>
             <div id="label-filters" class="filter-group label-filter-group" aria-label="标签"></div>
-            <button id="clear-filters" class="filter-clear" type="button" onclick="clearBoardFilters()" hidden>清除筛选</button>
+            <button id="clear-filters" class="filter-clear" type="button" hidden>清除筛选</button>
         </div>
+        <div id="filter-summary" class="filter-summary" role="status" hidden></div>
+        <div id="filter-reorder-hint" class="filter-reorder-hint" role="status" hidden>筛选状态下暂不支持卡片和列手动排序</div>
         <div id="board" class="board" aria-label="看板">
             <!-- 列由 JS 渲染 -->
         </div>
@@ -67,7 +58,7 @@
     <!-- ============ 历史搜索视图 ============ -->
     <main id="view-history" class="history-view" role="tabpanel" aria-labelledby="btn-history" tabindex="0" hidden>
         <div class="search-panel">
-            <input type="text" id="search-q" placeholder="搜索标题 / 描述 / 标签 / 附件名称…" onkeydown="if(event.key==='Enter')doSearch()">
+            <input type="text" id="search-q" placeholder="搜索标题 / 描述 / 标签 / 附件名称…">
             <label>优先级
                 <select id="search-priority">
                     <option value="">全部</option>
@@ -80,27 +71,34 @@
                 <label class="date-control date-control-compact">
                     <span>截止从</span>
                     <span class="history-date-shell">
-                        <button class="history-date-trigger" type="button" title="选择起始日期" aria-label="打开截止日期从选择器" onclick="openNativePicker('search-from')">
+                        <button id="search-from-trigger" class="history-date-trigger" type="button" title="选择起始日期" aria-label="打开截止日期从选择器">
                             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
                         </button>
-                        <input type="date" id="search-from" aria-label="截止日期从" oninput="syncHistoryDateControl('from')">
-                        <button class="history-date-clear" id="search-from-clear" type="button" title="清除起始日期" aria-label="清除截止日期从" onclick="clearHistoryDate('from')" hidden>×</button>
+                        <input type="date" id="search-from" aria-label="截止日期从">
+                        <button class="history-date-clear" id="search-from-clear" type="button" title="清除起始日期" aria-label="清除截止日期从" hidden>×</button>
                     </span>
                 </label>
                 <span class="date-range-separator" aria-hidden="true">至</span>
                 <label class="date-control date-control-compact">
                     <span>截止到</span>
                     <span class="history-date-shell">
-                        <button class="history-date-trigger" type="button" title="选择结束日期" aria-label="打开截止日期到选择器" onclick="openNativePicker('search-to')">
+                        <button id="search-to-trigger" class="history-date-trigger" type="button" title="选择结束日期" aria-label="打开截止日期到选择器">
                             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
                         </button>
-                        <input type="date" id="search-to" aria-label="截止日期到" oninput="syncHistoryDateControl('to')">
-                        <button class="history-date-clear" id="search-to-clear" type="button" title="清除结束日期" aria-label="清除截止日期到" onclick="clearHistoryDate('to')" hidden>×</button>
+                        <input type="date" id="search-to" aria-label="截止日期到">
+                        <button class="history-date-clear" id="search-to-clear" type="button" title="清除结束日期" aria-label="清除截止日期到" hidden>×</button>
                     </span>
                 </label>
             </div>
             <label class="checkbox"><input type="checkbox" id="search-all" checked> 包含未归档卡片</label>
-            <button class="history-search-btn" type="button" onclick="doSearch()" aria-label="搜索历史归档">
+            <div class="history-sort">
+                <button id="history-sort-button" class="history-sort-button" type="button" aria-haspopup="menu" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h9M8 18h6M4 5v14m0 0-2.5-2.5M4 19l2.5-2.5"/></svg>
+                    <span id="history-sort-label">最近归档</span>
+                </button>
+                <div id="history-sort-menu" class="history-sort-menu" role="menu" aria-label="历史卡片排序" hidden></div>
+            </div>
+            <button class="history-search-btn" type="button" aria-label="搜索历史归档">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
                 <span>搜索归档</span>
             </button>
@@ -114,8 +112,8 @@
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title-text">
             <div class="modal-header">
                 <h2 id="modal-title-text">编辑卡片</h2>
-                <button class="icon-btn danger card-archive-btn" aria-label="归档卡片" title="归档卡片" onclick="deleteCurrentCard()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg></button>
-                <button class="icon-btn" aria-label="关闭卡片编辑" title="关闭" onclick="closeCardModal()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                <button id="card-archive-button" class="icon-btn danger card-archive-btn" aria-label="归档卡片" title="归档卡片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg></button>
+                <button id="card-close-button" class="icon-btn" aria-label="关闭卡片编辑" title="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
             </div>
             <div class="modal-body">
                 <label>标题 <span class="req">*</span>
@@ -162,18 +160,18 @@
                 <label><span class="label-inline">截止日期 <small>(时间可选)</small></span>
                     <div class="due-inputs">
                         <span class="date-input-shell date-shell-calendar">
-                            <button class="date-picker-trigger" type="button" title="选择截止日期" aria-label="打开截止日期选择器" onclick="openNativePicker('card-due')">
+                            <button id="card-date-trigger" class="date-picker-trigger" type="button" title="选择截止日期" aria-label="打开截止日期选择器">
                                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
                             </button>
-                            <input class="native-date-control" type="date" id="card-due" aria-label="截止日期" oninput="syncCardDateControl()">
-                            <button class="date-clear-btn" id="card-date-clear" type="button" title="清除日期" aria-label="清除截止日期" onclick="clearCardDate()" hidden>×</button>
+                            <input class="native-date-control" type="date" id="card-due" aria-label="截止日期">
+                            <button class="date-clear-btn" id="card-date-clear" type="button" title="清除日期" aria-label="清除截止日期" hidden>×</button>
                         </span>
                         <span class="date-input-shell date-shell-time">
-                            <button class="date-picker-trigger" type="button" title="选择截止时间" aria-label="打开截止时间选择器" onclick="openNativePicker('card-due-time')">
+                            <button id="card-time-trigger" class="date-picker-trigger" type="button" title="选择截止时间" aria-label="打开截止时间选择器">
                                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
                             </button>
-                            <input class="native-date-control" type="time" id="card-due-time" step="60" aria-label="截止时间（可选）" oninput="syncCardTimeControl()">
-                            <button class="time-clear-btn" id="card-time-clear" type="button" title="清除时间" aria-label="清除截止时间" onclick="clearCardTime()" hidden>×</button>
+                            <input class="native-date-control" type="time" id="card-due-time" step="60" aria-label="截止时间（可选）">
+                            <button class="time-clear-btn" id="card-time-clear" type="button" title="清除时间" aria-label="清除截止时间" hidden>×</button>
                         </span>
                     </div>
                 </label>
@@ -183,10 +181,10 @@
                 <div class="field" id="card-move-controls" hidden>
                     <span class="field-label">调整位置</span>
                     <div class="move-controls">
-                        <button type="button" class="ghost" onclick="moveCurrentCard('top')">移到顶部</button>
-                        <button type="button" class="ghost" onclick="moveCurrentCard('up')">上移</button>
-                        <button type="button" class="ghost" onclick="moveCurrentCard('down')">下移</button>
-                        <button type="button" class="ghost" onclick="moveCurrentCard('bottom')">移到底部</button>
+                        <button type="button" class="ghost" data-move-direction="top">移到顶部</button>
+                        <button type="button" class="ghost" data-move-direction="up">上移</button>
+                        <button type="button" class="ghost" data-move-direction="down">下移</button>
+                        <button type="button" class="ghost" data-move-direction="bottom">移到底部</button>
                     </div>
                 </div>
                 <div class="field attachment-field" id="attachment-field" role="group" aria-labelledby="attachment-label">
@@ -194,7 +192,7 @@
                     <small class="attachment-help" id="attachment-help">文件保留原始名称；同一卡片内名称不区分英文字母大小写。附件上传、覆盖和删除会立即生效，不受卡片保存或取消影响。</small>
                     <div id="attachment-list" class="attachment-list" aria-describedby="attachment-help"></div>
                     <div id="attachment-queue" class="attachment-queue" aria-live="polite" aria-atomic="false"></div>
-                    <button type="button" class="ghost attachment-add-btn" onclick="selectAttachments()">＋ 添加附件</button>
+                    <button type="button" id="attachment-add-button" class="ghost attachment-add-btn">＋ 添加附件</button>
                     <input id="attachment-input" type="file" multiple hidden>
                 </div>
                 <label>优先级
@@ -208,8 +206,8 @@
             <div class="modal-footer">
                 <span id="card-meta" class="card-meta"></span>
                 <div>
-                    <button class="ghost" onclick="closeCardModal()">取消</button>
-                    <button class="primary card-save-btn" onclick="saveCard()">保存</button>
+                    <button id="card-cancel-button" class="ghost">取消</button>
+                    <button class="primary card-save-btn">保存</button>
                 </div>
             </div>
         </div>
@@ -220,7 +218,7 @@
         <div class="modal small" role="dialog" aria-modal="true" aria-labelledby="column-modal-title">
             <div class="modal-header">
                 <h2 id="column-modal-title">新增列</h2>
-                <button class="icon-btn" aria-label="关闭新增列" onclick="closeColumnModal()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                <button id="column-close-button" class="icon-btn" aria-label="关闭新增列"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
             </div>
             <div class="modal-body">
                 <label>列名 <span class="req">*</span>
@@ -230,8 +228,8 @@
             <div class="modal-footer">
                 <div></div>
                 <div>
-                    <button class="ghost" onclick="closeColumnModal()">取消</button>
-                    <button class="primary" onclick="saveColumn()">确定</button>
+                    <button id="column-cancel-button" class="ghost">取消</button>
+                    <button id="column-save-button" class="primary">确定</button>
                 </div>
             </div>
         </div>
@@ -253,6 +251,6 @@
     <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <div id="live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
-    <script type="module" src="/static/app.js"></script>
+    <script type="module" src="/static/kanban.js"></script>
 </body>
 </html>

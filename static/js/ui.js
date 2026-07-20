@@ -1,7 +1,12 @@
+export function clearChildren(node) {
+    if (typeof node.replaceChildren === "function") node.replaceChildren();
+    else while (node.firstChild) node.removeChild(node.firstChild);
+}
+
 export function toast(message, options = {}) {
     if (typeof options === "boolean") options = { error: options };
     const box = document.getElementById("toast");
-    box.replaceChildren();
+    clearChildren(box);
     const text = document.createElement("span");
     text.textContent = message;
     box.appendChild(text);
@@ -38,7 +43,7 @@ export function formatBytes(value) {
 
 export function setBusy(button, busy, label) {
     if (!button) return;
-    if (busy) button.dataset.originalText ||= button.textContent;
+    if (busy && !button.dataset.originalText) button.dataset.originalText = button.textContent;
     button.disabled = busy;
     button.setAttribute("aria-busy", String(busy));
     button.textContent = busy ? label : button.dataset.originalText || button.textContent;

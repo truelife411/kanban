@@ -38,13 +38,47 @@ export function splitDue(value) {
 export function joinDue(date, time) { return date ? date + (time ? ` ${time}` : "") : ""; }
 export function dueDisplay(value) { return `📅 ${value.trim()}`; }
 
+export function parseLocalTimestamp(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec((value || "").trim());
+    if (!match) return null;
+    const parts = match.slice(1).map(Number);
+    const date = new Date(parts[0], parts[1] - 1, parts[2], parts[3], parts[4], parts[5]);
+    if (date.getFullYear() !== parts[0] || date.getMonth() !== parts[1] - 1 || date.getDate() !== parts[2] || date.getHours() !== parts[3] || date.getMinutes() !== parts[4] || date.getSeconds() !== parts[5]) return null;
+    return date;
+}
+
+export function fullTimestamp(value) {
+    const date = parseLocalTimestamp(value);
+    if (!date) return value || "未知";
+    return `${localDateKey(date)} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}`;
+}
+
+export function compactCreatedTime(value, referenceDate = new Date()) {
+    const date = parseLocalTimestamp(value);
+    if (!date) return "未知";
+    if (date.getFullYear() === referenceDate.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`;
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+export function relativeTimestamp(value, referenceDate = new Date()) {
+    const date = parseLocalTimestamp(value);
+    if (!date) return "未知";
+    const seconds = Math.max(0, Math.floor((referenceDate.getTime() - date.getTime()) / 1000));
+    if (seconds < 60) return "刚刚";
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`;
+    if (seconds < 604800) return `${Math.floor(seconds / 86400)}天前`;
+    return compactCreatedTime(value, referenceDate);
+}
+
+
 export function openNativePicker(id) {
     const input = document.getElementById(id);
-    if (!input) return;
-    input.focus();
+    if (!input || input.disabled || input.readOnly) return;
     if (typeof input.showPicker === "function") {
-        try { input.showPicker(); } catch (_) { input.click(); }
-    } else input.click();
+        try { input.showPicker(); return; } catch (_) {}
+    }
+    input.focus();
 }
 
 function syncShell(input, shellSelector, clearId, className) {
