@@ -22,21 +22,8 @@
             <button id="btn-history" data-view="history" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">历史归档</button>
         </div>
         <div class="topbar-right">
-            <button id="import-button" class="icon-btn toolbar-icon-only" title="导入 JSON 或完整备份" aria-label="导入 JSON 或完整备份"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 14v5h14v-5"/></svg></button>
-            <button id="export-button" class="icon-btn toolbar-icon-only" title="导出 JSON（不含附件文件）" aria-label="导出 JSON（不含附件文件）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4-4m-4 4-4-4M5 14v5h14v-5"/></svg></button>
-            <button id="backup-button" class="icon-btn toolbar-icon-only" title="完整备份（含附件）" aria-label="完整备份（含附件）"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></button>
-            <div class="theme-picker">
-                <button id="theme-button" class="icon-btn toolbar-icon-only" type="button" title="切换主题" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18h1.2a2 2 0 0 0 0-4H12a1.5 1.5 0 0 1 0-3h3a6 6 0 0 0 0-12h-3Z"/><circle cx="7.5" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="9.5" cy="6.5" r="1" fill="currentColor" stroke="none"/><circle cx="14" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg></button>
-                <div id="theme-menu" class="theme-menu" role="menu" aria-label="选择主题" hidden>
-                    <button type="button" role="menuitemradio" data-theme-value="douban-classic"><span class="theme-swatch theme-swatch-classic"></span><span>豆瓣绿</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="dark-tech"><span class="theme-swatch theme-swatch-dark"></span><span>暗夜黑</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="office"><span class="theme-swatch theme-swatch-office"></span><span>简约灰</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="cloud-blue"><span class="theme-swatch theme-swatch-cloud"></span><span>云端蓝</span><span class="theme-check">✓</span></button>
-                    <button type="button" role="menuitemradio" data-theme-value="aurora-blue"><span class="theme-swatch theme-swatch-aurora"></span><span>极光紫</span><span class="theme-check">✓</span></button>
-                </div>
-            </div>
+            <button id="settings-button" class="icon-btn toolbar-icon-only" type="button" title="设置" aria-label="设置" aria-controls="view-settings" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.7 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.5 4.7a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.15.38.38.72.7 1 .3.25.68.39 1.1.4h.1v4h-.1a1.7 1.7 0 0 0-1.8.6Z"/></svg></button>
             <button id="add-column-button" class="icon-btn add-btn" title="新增列"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增列</span></button>
-            <input id="import-file" type="file" accept="application/json,.json,application/zip,.zip" hidden>
         </div>
     </header>
 
@@ -107,6 +94,65 @@
         <div id="search-results" class="search-results"></div>
     </main>
 
+    <!-- ============ 设置视图 ============ -->
+    <main id="view-settings" class="settings-view" aria-labelledby="settings-title" tabindex="0" hidden>
+        <div class="settings-shell">
+            <div class="settings-heading">
+                <div>
+                    <p class="settings-eyebrow">偏好与数据</p>
+                    <h2 id="settings-title">设置</h2>
+                </div>
+                <button id="settings-back-button" class="ghost settings-back" type="button">返回看板</button>
+            </div>
+
+            <section class="settings-section" aria-labelledby="board-display-title">
+                <div class="settings-section-heading">
+                    <h3 id="board-display-title">看板显示</h3>
+                    <p>调整卡片在看板中的信息密度。</p>
+                </div>
+                <fieldset class="settings-fieldset">
+                    <legend>卡片描述</legend>
+                    <div class="segmented-options description-options">
+                        <label><input type="radio" name="card-description-display" value="none"><span>不展示</span></label>
+                        <label><input type="radio" name="card-description-display" value="one-line"><span>展示一行</span></label>
+                        <label><input type="radio" name="card-description-display" value="two-lines"><span>展示两行</span></label>
+                        <label><input type="radio" name="card-description-display" value="full" checked><span>全展示</span></label>
+                    </div>
+                </fieldset>
+            </section>
+
+            <section class="settings-section" aria-labelledby="appearance-title">
+                <div class="settings-section-heading">
+                    <h3 id="appearance-title">外观设置</h3>
+                    <p>主题选择会保存在当前浏览器中。</p>
+                </div>
+                <fieldset class="settings-fieldset">
+                    <legend>主题</legend>
+                    <div id="theme-options" class="theme-options">
+                        <label><input type="radio" name="theme" value="douban-classic" data-theme-value="douban-classic"><span class="theme-option-content"><span class="theme-swatch theme-swatch-classic"></span><span>豆瓣绿</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="dark-tech" data-theme-value="dark-tech"><span class="theme-option-content"><span class="theme-swatch theme-swatch-dark"></span><span>暗夜黑</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="office" data-theme-value="office"><span class="theme-option-content"><span class="theme-swatch theme-swatch-office"></span><span>简约灰</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="cloud-blue" data-theme-value="cloud-blue"><span class="theme-option-content"><span class="theme-swatch theme-swatch-cloud"></span><span>云端蓝</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="aurora-blue" data-theme-value="aurora-blue"><span class="theme-option-content"><span class="theme-swatch theme-swatch-aurora"></span><span>极光紫</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                    </div>
+                </fieldset>
+            </section>
+
+            <section class="settings-section" aria-labelledby="data-management-title">
+                <div class="settings-section-heading">
+                    <h3 id="data-management-title">数据管理</h3>
+                    <p>JSON 适合迁移看板数据；完整 ZIP 备份会同时包含附件文件。</p>
+                </div>
+                <div class="data-actions">
+                    <button id="import-button" class="settings-action" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 14v5h14v-5"/></svg><span><strong>导入</strong><small>JSON 或完整 ZIP 备份</small></span></button>
+                    <button id="export-button" class="settings-action" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0 4-4m-4 4-4-4M5 14v5h14v-5"/></svg><span><strong>导出 JSON</strong><small>不包含附件文件</small></span></button>
+                    <button id="backup-button" class="settings-action" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg><span><strong>完整备份（含附件）</strong><small>下载完整 ZIP 备份</small></span></button>
+                </div>
+                <input id="import-file" type="file" accept="application/json,.json,application/zip,.zip" hidden>
+            </section>
+        </div>
+    </main>
+
     <!-- ============ 卡片编辑弹窗 ============ -->
     <div id="card-modal" class="modal-overlay" hidden>
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title-text">
@@ -141,6 +187,31 @@
                             <button type="button" title="斜体" aria-label="斜体" data-cmd="italic"><span class="tb-letter italic">I</span></button>
                             <button type="button" title="下划线" aria-label="下划线" data-cmd="underline"><span class="tb-letter underline">U</span></button>
                             <button type="button" title="删除线" aria-label="删除线" data-cmd="strikeThrough"><span class="tb-letter strike">S</span></button>
+                        </div>
+                        <span class="tb-sep" aria-hidden="true"></span>
+                        <div class="tb-group tb-color-group" role="group" aria-label="文字颜色">
+                            <div class="rich-color-picker">
+                                <button id="text-color-button" type="button" title="文字颜色" aria-label="文字颜色" aria-haspopup="menu" aria-expanded="false"><span class="tb-color-icon rt-fg-red">A</span></button>
+                                <div id="text-color-menu" class="rich-color-menu" role="menu" aria-label="选择文字颜色" data-color-kind="fg" hidden>
+                                    <button type="button" role="menuitem" data-color-value=""><span class="color-reset" aria-hidden="true">×</span><span>默认颜色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="red"><span class="color-swatch rt-fg-red" aria-hidden="true">A</span><span>红色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="yellow"><span class="color-swatch rt-fg-yellow" aria-hidden="true">A</span><span>黄色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="green"><span class="color-swatch rt-fg-green" aria-hidden="true">A</span><span>绿色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="blue"><span class="color-swatch rt-fg-blue" aria-hidden="true">A</span><span>蓝色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="purple"><span class="color-swatch rt-fg-purple" aria-hidden="true">A</span><span>紫色</span></button>
+                                </div>
+                            </div>
+                            <div class="rich-color-picker">
+                                <button id="highlight-color-button" type="button" title="文字底纹" aria-label="文字底纹" aria-haspopup="menu" aria-expanded="false"><span class="tb-color-icon rt-bg-yellow">A</span></button>
+                                <div id="highlight-color-menu" class="rich-color-menu" role="menu" aria-label="选择文字底纹" data-color-kind="bg" hidden>
+                                    <button type="button" role="menuitem" data-color-value=""><span class="color-reset" aria-hidden="true">×</span><span>清除底纹</span></button>
+                                    <button type="button" role="menuitem" data-color-value="red"><span class="color-swatch rt-bg-red" aria-hidden="true"></span><span>红色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="yellow"><span class="color-swatch rt-bg-yellow" aria-hidden="true"></span><span>黄色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="green"><span class="color-swatch rt-bg-green" aria-hidden="true"></span><span>绿色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="blue"><span class="color-swatch rt-bg-blue" aria-hidden="true"></span><span>蓝色</span></button>
+                                    <button type="button" role="menuitem" data-color-value="purple"><span class="color-swatch rt-bg-purple" aria-hidden="true"></span><span>紫色</span></button>
+                                </div>
+                            </div>
                         </div>
                         <span class="tb-sep tb-sep-history" aria-hidden="true"></span>
                         <div class="tb-group tb-history" role="group" aria-label="操作历史">

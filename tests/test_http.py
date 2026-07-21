@@ -153,7 +153,7 @@ class HttpApiTests(unittest.TestCase):
 
         update_payload = self.card_payload({"columns": board["columns"], "revision": created["revision"]}, "换行往返更新")
         update_payload.update({
-            "description": "第一行\n\n第三行<ul><li>列表<ol><li><em>嵌套</em></li></ol></li></ul>",
+            "description": '第一行\n\n第三行<ul><li>列表<ol><li><span class="rt-fg-purple rt-bg-yellow"><em>嵌套</em></span></li></ol></li></ul>',
             "expected_version": card["version"],
         })
         status, _, body = self.request("PUT", f"/api/cards/{card['id']}", update_payload)

@@ -206,6 +206,9 @@ class CardMovementTests(DatabaseTestCase):
         self.delete_column(original["id"])
         recreated = self.create_column("Cafe\u0301")
         archived = app.get_card(self.conn, card["id"])
+        result = app.search_cards(self.conn, q="Unicode 恢复")[0]
+        self.assertTrue(result["column_deleted"])
+        self.assertEqual(result["restore_column_id"], recreated["id"])
         restored = app.restore_card(self.conn, card["id"], self.with_card_tokens(card["id"]))["card"]
         self.assertEqual(restored["column_id"], recreated["id"])
         self.assertGreater(restored["version"], archived["version"])
@@ -260,6 +263,29 @@ class ValidationTests(DatabaseTestCase):
         sanitized = app.sanitize_description(source)
         self.assertEqual(sanitized, "<p>安全<i>格式</i></p>")
         self.assertEqual(app.sanitize_description(sanitized), sanitized)
+
+    def test_description_color_classes_are_allowlisted_and_canonical(self):
+        source = '<span class="evil rt-bg-yellow rt-fg-red rt-fg-blue" style="position:fixed" onclick="x"><strong>重点</strong></span><span class="unknown">普通</span><font color="red">旧格式</font>'
+        sanitized = app.sanitize_description(source)
+        self.assertEqual(sanitized, '<span class="rt-fg-red rt-bg-yellow"><strong>重点</strong></span>普通旧格式')
+        self.assertEqual(app.sanitize_description(sanitized), sanitized)
+        self.assertEqual(app.sanitize_description('<span style="color:red;background:url(x)">无样式</span>'), "无样式")
+        self.assertEqual(app.sanitize_description('<span class="rt-fg-default">默认</span><span class="rt-bg-clear">无底纹</span>'), '<span class="rt-fg-default">默认</span><span class="rt-bg-clear">无底纹</span>')
+
+    def test_description_color_classes_round_trip_through_card_storage(self):
+        column = app.list_columns(self.conn)[0]
+        description = '<p><span class="rt-fg-blue rt-bg-green"><em>彩色内容</em></span></p>'
+        card = app.create_card(self.conn, self.with_revision({"column_id": column["id"], "title": "颜色", "description": description, "labels": "", "due_date": "", "priority": "medium"}))["card"]
+        self.assertEqual(card["description"], description)
+        self.assertEqual(app.get_card(self.conn, card["id"])["description"], description)
+
+    def test_backup_validation_rejects_noncanonical_description(self):
+        column = app.list_columns(self.conn)[0]
+        card = self.create_card(column["id"], "不安全备份")
+        self.conn.execute("UPDATE cards SET description=? WHERE id=?", ('<span style="color:red">危险</span>', card["id"]))
+        with self.assertRaises(app.ApiError) as raised:
+            app.validate_board_invariants(self.conn)
+        self.assertEqual(raised.exception.code, "INVALID_CARD_DESCRIPTION")
 
     def test_description_preserves_original_plain_text_newlines(self):
         source = "第一行\n\n第三行"

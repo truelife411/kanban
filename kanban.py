@@ -234,14 +234,22 @@ def validate_due_date(value):
 
 
 class SafeHtmlParser(HTMLParser):
-    allowed = {"p", "br", "ul", "ol", "li", "strong", "b", "em", "i", "u", "s"}
+    allowed = {"p", "br", "ul", "ol", "li", "strong", "b", "em", "i", "u", "s", "span"}
     blocked_tags = {"script", "style", "iframe", "object", "svg"}
+    text_color_classes = {"rt-fg-default", "rt-fg-red", "rt-fg-yellow", "rt-fg-green", "rt-fg-blue", "rt-fg-purple"}
+    highlight_classes = {"rt-bg-clear", "rt-bg-red", "rt-bg-yellow", "rt-bg-green", "rt-bg-blue", "rt-bg-purple"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.root = []
-        self.stack = [(None, self.root)]
+        self.stack = [(None, (), self.root)]
         self.blocked = 0
+
+    def _span_classes(self, attrs):
+        values = dict(attrs).get("class", "").split()
+        foreground = next((value for value in values if value in self.text_color_classes), None)
+        highlight = next((value for value in values if value in self.highlight_classes), None)
+        return tuple(value for value in (foreground, highlight) if value)
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
@@ -253,10 +261,11 @@ class SafeHtmlParser(HTMLParser):
             self.blocked = 1
             return
         if tag == "br":
-            self.stack[-1][1].append(("br", []))
+            self.stack[-1][2].append(("br", (), []))
         elif tag in self.allowed or tag == "div":
-            node = (tag, [])
-            self.stack[-1][1].append(node)
+            classes = self._span_classes(attrs) if tag == "span" else ()
+            node = (tag, classes, [])
+            self.stack[-1][2].append(node)
             self.stack.append(node)
 
     def handle_startendtag(self, tag, attrs):
@@ -279,7 +288,7 @@ class SafeHtmlParser(HTMLParser):
 
     def handle_data(self, data):
         if not self.blocked:
-            self.stack[-1][1].append(data)
+            self.stack[-1][2].append(data)
 
     @staticmethod
     def _empty_block(children):
@@ -291,13 +300,16 @@ class SafeHtmlParser(HTMLParser):
             if isinstance(node, str):
                 output.append(escape(node, quote=False))
                 continue
-            tag, children = node
+            tag, classes, children = node
             if tag == "br":
                 output.append("<br>")
                 continue
             rendered = self._render(children, tag)
             if tag == "div" and parent is not None:
                 output.append(rendered)
+                continue
+            if tag == "span":
+                output.append("<span class=\"%s\">%s</span>" % (" ".join(classes), rendered) if classes else rendered)
                 continue
             normalized_tag = "p" if tag == "div" else tag
             if normalized_tag == "p" and self._empty_block(children):
@@ -1440,7 +1452,9 @@ def validate_board_invariants(conn):
         if key in names:
             raise ApiError("活动列名称不能重复", 422, "DUPLICATE_COLUMN_NAME")
         names.add(key)
-    for row in conn.execute("SELECT id,due_date,priority,created_at,updated_at,archived,archived_at,archive_reason FROM cards WHERE is_draft=0"):
+    for row in conn.execute("SELECT id,description,due_date,priority,created_at,updated_at,archived,archived_at,archive_reason FROM cards WHERE is_draft=0"):
+        if sanitize_description(row["description"]) != row["description"]:
+            raise ApiError("卡片描述包含不安全或非规范格式", 422, "INVALID_CARD_DESCRIPTION", {"card_id": row["id"]})
         validate_priority(row["priority"]); validate_due_date(row["due_date"])
         try:
             created = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S")

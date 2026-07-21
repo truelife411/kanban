@@ -45,10 +45,11 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertEqual(toast.get("aria-live"), "polite")
 
     def test_topbar_icon_actions_have_tooltips(self):
-        theme = next(attrs for _, attrs in self.parser.elements if attrs.get("id") == "theme-button")
-        self.assertEqual(theme.get("title"), "切换主题")
-        self.assertEqual(theme.get("aria-label"), "切换主题")
-        self.assertGreaterEqual(self.html.count("toolbar-icon-only"), 4)
+        settings = next(attrs for _, attrs in self.parser.elements if attrs.get("id") == "settings-button")
+        self.assertEqual(settings.get("title"), "设置")
+        self.assertEqual(settings.get("aria-label"), "设置")
+        self.assertEqual(settings.get("aria-controls"), "view-settings")
+        self.assertIn('id="add-column-button"', self.html)
 
     def test_auto_archive_tooltip_is_delayed_on_completed_header(self):
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
@@ -80,8 +81,11 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('event.key==="ArrowRight"', app_js)
         self.assertIn('event.key==="ArrowLeft"', app_js)
 
-    def test_theme_menu_and_four_themes_exist(self):
-        self.assertIn('id="theme-menu"', self.html)
+    def test_theme_settings_and_five_themes_exist(self):
+        self.assertIn('id="view-settings"', self.html)
+        self.assertIn('id="theme-options"', self.html)
+        self.assertNotIn('id="theme-button"', self.html)
+        self.assertNotIn('id="theme-menu"', self.html)
         self.assertIn('data-theme="douban-classic"', self.html)
         for theme in ("douban-classic", "dark-tech", "office", "cloud-blue", "aurora-blue"):
             self.assertIn(theme, self.html)
@@ -183,8 +187,73 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn(".card-descp,.card-descdiv,.editorp,.editordiv{margin:0;min-height:1.5em;}", compact_css)
         self.assertIn(".card-descul,.card-descol,.editorul,.editorol{padding-left:24px;margin:4px0;white-space:normal;}", compact_css)
         self.assertIn('description.innerHTML=card.description', app_js)
+        self.assertNotIn('description.textContent=stripHtml(card.description)', app_js)
+        self.assertIn(".result-descp,.result-descdiv{margin:0;min-height:1.5em;}", compact_css)
+        self.assertIn(".result-descul,.result-descol{padding-left:24px;margin:4px0;white-space:normal;}", compact_css)
         self.assertIn('document.getElementById("card-description").innerHTML=card.description||""', app_js)
         self.assertIn('description:document.getElementById("card-description").innerHTML', app_js)
+
+    def test_rich_text_color_controls_are_safe_and_accessible(self):
+        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        compact_css = "".join(self.css.split())
+        for element_id in ("text-color-button", "text-color-menu", "highlight-color-button", "highlight-color-menu"):
+            self.assertIn(f'id="{element_id}"', self.html)
+        self.assertIn('aria-haspopup="menu"', self.html)
+        self.assertIn('data-color-kind="fg"', self.html)
+        self.assertIn('data-color-kind="bg"', self.html)
+        self.assertNotIn('type="color"', self.html)
+        self.assertNotIn("foreColor", app_js)
+        self.assertNotIn("hiliteColor", app_js)
+        self.assertNotIn("backColor", app_js)
+        self.assertIn("RICH_TEXT_COLORS", app_js)
+        self.assertIn("请先选择文字", app_js)
+        self.assertIn('event.key==="Escape"', app_js)
+        for color_class in ("rt-fg-red", "rt-fg-yellow", "rt-fg-green", "rt-fg-blue", "rt-fg-purple", "rt-bg-red", "rt-bg-yellow", "rt-bg-green", "rt-bg-blue", "rt-bg-purple"):
+            self.assertIn(color_class, self.html)
+            self.assertIn(color_class, self.css)
+        self.assertIn(".editor.rt-fg-red,.card-desc.rt-fg-red,.result-desc.rt-fg-red", compact_css)
+        self.assertIn("--rt-fg-red:#ff0000", compact_css)
+        self.assertIn("--rt-fg-yellow:#ffff00", compact_css)
+        self.assertIn("--rt-fg-green:#166534", compact_css)
+        self.assertIn("--rt-fg-blue:#1d4ed8", compact_css)
+        self.assertIn("--rt-fg-purple:#6b21a8", compact_css)
+        self.assertIn("--rt-bg-red:#ff0000", compact_css)
+        self.assertIn("--rt-bg-yellow:#ffff00", compact_css)
+        self.assertIn("--rt-bg-green:#dcfce7", compact_css)
+        self.assertIn("--rt-bg-blue:#dbeafe", compact_css)
+        self.assertIn("--rt-bg-purple:#f3e8ff", compact_css)
+        self.assertIn(':root[data-theme="dark-tech"]{--rt-fg-green:#86efac;', compact_css)
+        self.assertNotIn("rt-fg-amber", self.html + self.css + app_js)
+
+    def test_settings_and_card_description_preference_contract(self):
+        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        state_js = (ROOT / "static" / "js" / "state.js").read_text(encoding="utf-8")
+        compact_css = "".join(self.css.split())
+        for element_id in ("settings-button", "view-settings", "settings-back-button", "board-display-title", "appearance-title", "data-management-title"):
+            self.assertIn(f'id="{element_id}"', self.html)
+        self.assertLess(self.html.index('id="view-settings"'), self.html.index('id="import-button"'))
+        for value in ("none", "one-line", "two-lines", "full"):
+            self.assertIn(f'value="{value}"', self.html)
+        self.assertIn('value="full" checked', self.html)
+        self.assertIn('cardDescriptionDisplay: "full"', state_js)
+        self.assertIn('CARD_DESCRIPTION_STORAGE_KEY="kanban-card-description-display"', app_js)
+        self.assertIn("CARD_DESCRIPTION_OPTIONS.has(value)", app_js)
+        self.assertIn("localStorage.getItem(CARD_DESCRIPTION_STORAGE_KEY)", app_js)
+        self.assertIn("localStorage.setItem(CARD_DESCRIPTION_STORAGE_KEY,state.cardDescriptionDisplay)", app_js)
+        self.assertLess(app_js.index("loadCardDescriptionPreference()"), app_js.index("refresh(true)"))
+        self.assertIn('state.cardDescriptionDisplay!=="none"', app_js)
+        self.assertIn('description.classList.add(state.cardDescriptionDisplay)', app_js)
+        self.assertIn(".card-desc.one-line,.card-desc.two-lines{overflow:hidden;}", compact_css)
+        self.assertIn(".card-desc.one-line{max-height:1.45em;}", compact_css)
+        self.assertIn(".card-desc.two-lines{max-height:2.9em;}", compact_css)
+        self.assertIn(".settings-view{", compact_css)
+        self.assertIn(".data-actions{", compact_css)
+
+    def test_history_restore_uses_matched_active_column(self):
+        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        self.assertIn("state.columns.find(column=>column.id===card.restore_column_id)", app_js)
+        self.assertIn("restoreCard(card,card.restore_column_id||undefined)", app_js)
+        self.assertNotIn("button.onclick=()=>restoreCard(card);", app_js)
 
     def test_filter_reorder_and_compatibility_contracts(self):
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
