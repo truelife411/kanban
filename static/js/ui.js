@@ -64,26 +64,31 @@ export function hideModal(id, state) {
     if (opener?.isConnected) opener.focus();
 }
 
-export function chooseAction({ title, message, primary, secondary }) {
+export function chooseAction({ title, message, primary, secondary, danger = false, primaryClass, focus = "primary" }) {
     return new Promise(resolve => {
         const overlay = document.getElementById("choice-modal");
         document.getElementById("choice-title").textContent = title;
         document.getElementById("choice-message").textContent = message;
         const primaryButton = document.getElementById("choice-primary");
         const secondaryButton = document.getElementById("choice-secondary");
+        const cancelButton = document.getElementById("choice-cancel");
         primaryButton.textContent = primary;
         secondaryButton.textContent = secondary;
+        primaryButton.className = primaryClass || (danger ? "danger-action" : "primary");
+        secondaryButton.hidden = !secondary;
         overlay.hidden = false;
         const finish = value => {
             overlay.hidden = true;
             primaryButton.onclick = null;
             secondaryButton.onclick = null;
-            document.getElementById("choice-cancel").onclick = null;
+            cancelButton.onclick = null;
+            primaryButton.className = "primary";
+            secondaryButton.hidden = false;
             resolve(value);
         };
         primaryButton.onclick = () => finish("primary");
         secondaryButton.onclick = () => finish("secondary");
-        document.getElementById("choice-cancel").onclick = () => finish("cancel");
-        primaryButton.focus();
+        cancelButton.onclick = () => finish("cancel");
+        requestAnimationFrame(() => (focus === "cancel" ? cancelButton : primaryButton).focus());
     });
 }

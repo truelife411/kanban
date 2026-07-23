@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -91,9 +92,22 @@ class ServerConfigurationTests(unittest.TestCase):
 
 class MigrationTests(DatabaseTestCase):
     def test_latest_schema_is_created(self):
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 5)
         self.assertEqual(len(app.list_columns(self.conn)), 3)
-        self.assertEqual(app.get_board(self.conn)["schema_version"], 4)
+        self.assertEqual(app.get_board(self.conn)["schema_version"], 5)
+
+    def test_version_five_migration_normalizes_existing_descriptions_and_creates_backup(self):
+        column = app.list_columns(self.conn)[0]
+        card = self.create_card(column["id"], "旧描述")
+        legacy = '<p><span class="rt-bg-clear"></span><span class="rt-fg-red">甲</span><span class="rt-fg-red">乙</span></p>'
+        self.conn.execute("UPDATE cards SET description=? WHERE id=?", (legacy, card["id"]))
+        self.conn.execute("PRAGMA user_version = 4")
+        self.conn.close()
+        app.init_db()
+        self.conn = app.get_conn()
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(app.get_card(self.conn, card["id"])["description"], '<p><span class="rt-fg-red">甲乙</span></p>')
+        self.assertTrue(any(name.startswith("kanban-pre-migration-") for name in os.listdir(self.backup_dir)))
 
 
 class CardMovementTests(DatabaseTestCase):
@@ -270,7 +284,19 @@ class ValidationTests(DatabaseTestCase):
         self.assertEqual(sanitized, '<span class="rt-fg-red rt-bg-yellow"><strong>重点</strong></span>普通旧格式')
         self.assertEqual(app.sanitize_description(sanitized), sanitized)
         self.assertEqual(app.sanitize_description('<span style="color:red;background:url(x)">无样式</span>'), "无样式")
-        self.assertEqual(app.sanitize_description('<span class="rt-fg-default">默认</span><span class="rt-bg-clear">无底纹</span>'), '<span class="rt-fg-default">默认</span><span class="rt-bg-clear">无底纹</span>')
+        self.assertEqual(app.sanitize_description('<span class="rt-fg-default">默认</span><span class="rt-bg-clear">无底纹</span>'), '<span class="rt-fg-default">默认</span>无底纹')
+
+    def test_description_removes_empty_and_redundant_spans_and_merges_safe_neighbors(self):
+        source = '<p><span class="rt-bg-clear"></span><span class="rt-fg-red"><span class="rt-fg-red">甲</span>中<span class="rt-fg-red">乙</span></span><span class="rt-fg-red">丙</span><span></span></p>'
+        expected = '<p><span class="rt-fg-red">甲中乙丙</span></p>'
+        self.assertEqual(app.sanitize_description(source), expected)
+        self.assertEqual(app.sanitize_description(expected), expected)
+        self.assertEqual(app.sanitize_description('<p><span></span><span class="rt-bg-clear"></span></p>'), '<p><br></p>')
+
+    def test_description_preserves_distinct_foreground_background_combinations(self):
+        source = '<span class="rt-bg-green rt-fg-blue">甲</span><span class="rt-fg-blue rt-bg-green">乙</span><span class="rt-fg-blue rt-bg-yellow">丙</span>'
+        expected = '<span class="rt-fg-blue rt-bg-green">甲乙</span><span class="rt-fg-blue rt-bg-yellow">丙</span>'
+        self.assertEqual(app.sanitize_description(source), expected)
 
     def test_description_color_classes_round_trip_through_card_storage(self):
         column = app.list_columns(self.conn)[0]
@@ -503,6 +529,66 @@ class BackupImportTests(DatabaseTestCase):
             manifest = json.loads(archive.read("manifest.json"))
         self.assertEqual(manifest["format_version"], 2)
         self.assertEqual(len(manifest["database"]["sha256"]), 64)
+
+
+class PermanentDeleteTests(DatabaseTestCase):
+    def test_active_delete_compacts_positions_bumps_revision_and_cascades_attachments(self):
+        column = app.list_columns(self.conn)[0]
+        first = self.create_card(column["id"], "A")
+        target = self.create_card(column["id"], "B")
+        last = self.create_card(column["id"], "C")
+        attachment = app.save_attachment(self.conn, target["id"], "data.bin", "", io.BytesIO(b"data"), 4)
+        revision = app.board_revision(self.conn)
+        result = app.permanently_delete_card(self.conn, target["id"], self.with_card_tokens(target["id"]))
+        self.assertEqual(result["revision"], revision + 1)
+        self.assertEqual([(card["id"], card["position"]) for card in app.list_cards(self.conn, column["id"])], [(first["id"], 0), (last["id"], 1)])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM attachments WHERE id=?", (attachment["id"],)).fetchone()[0], 0)
+        self.assertFalse(os.path.exists(app.attachment_directory(target["id"])))
+
+    def test_archived_delete_does_not_rewrite_active_positions(self):
+        column = app.list_columns(self.conn)[0]
+        active = self.create_card(column["id"], "活动")
+        archived = self.create_card(column["id"], "归档")
+        self.archive_card(archived["id"])
+        before = [(card["id"], card["position"]) for card in app.list_cards(self.conn, column["id"])]
+        app.permanently_delete_card(self.conn, archived["id"], self.with_card_tokens(archived["id"]))
+        self.assertEqual([(card["id"], card["position"]) for card in app.list_cards(self.conn, column["id"])], before)
+        self.assertEqual(before, [(active["id"], 0)])
+
+    def test_conflicts_leave_card_and_attachment_directory_untouched(self):
+        card = self.create_card(app.list_columns(self.conn)[0]["id"], "冲突")
+        app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"data"), 4)
+        for payload, code in (
+            ({"expected_version": card["version"], "expected_board_revision": app.board_revision(self.conn) + 1}, "BOARD_REVISION_CONFLICT"),
+            ({"expected_version": card["version"] + 1, "expected_board_revision": app.board_revision(self.conn)}, "VERSION_CONFLICT"),
+        ):
+            with self.subTest(code=code), self.assertRaises(app.ApiError) as raised:
+                app.permanently_delete_card(self.conn, card["id"], payload)
+            self.assertEqual(raised.exception.code, code)
+            self.assertTrue(os.path.isfile(app.attachment_path(card["id"], "data.bin")))
+            self.assertEqual(app.get_card(self.conn, card["id"])["title"], "冲突")
+
+    def test_transaction_failure_restores_attachment_directory(self):
+        card = self.create_card(app.list_columns(self.conn)[0]["id"], "回滚")
+        app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"data"), 4)
+        with mock.patch.object(app, "bump_revision", side_effect=sqlite3.OperationalError("forced")):
+            with self.assertRaises(sqlite3.OperationalError):
+                app.permanently_delete_card(self.conn, card["id"], self.with_card_tokens(card["id"]))
+        self.assertTrue(os.path.isfile(app.attachment_path(card["id"], "data.bin")))
+        self.assertEqual(app.get_card(self.conn, card["id"])["title"], "回滚")
+
+    def test_postcommit_cleanup_failure_keeps_deleted_metadata_and_records_cleanup(self):
+        card = self.create_card(app.list_columns(self.conn)[0]["id"], "清理")
+        app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"data"), 4)
+        real_rmtree = shutil.rmtree
+        def fail_rollback(path, *args, **kwargs):
+            if ".permanent-delete-" in path:
+                raise PermissionError("locked")
+            return real_rmtree(path, *args, **kwargs)
+        with mock.patch.object(app.shutil, "rmtree", side_effect=fail_rollback):
+            app.permanently_delete_card(self.conn, card["id"], self.with_card_tokens(card["id"]))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM cards WHERE id=?", (card["id"],)).fetchone()[0], 0)
+        self.assertTrue(any(".permanent-delete-" in path for path in app.MAINTENANCE_REPORT["cleanup"]))
 
 
 class AttachmentTests(DatabaseTestCase):

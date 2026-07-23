@@ -8,7 +8,7 @@ export const state = {
         labels: [],
     },
     sortByColumn: {},
-    cardDescriptionDisplay: "full",
+    cardDescriptionDisplay: "two-lines",
     quickCreate: { columnId: null, title: "", submitting: false },
     currentCardId: null,
     currentCardCol: null,

@@ -133,7 +133,7 @@ class HttpApiTests(unittest.TestCase):
         status, headers, body = self.request("GET", "/api/board")
         data = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(data["schema_version"], 4)
+        self.assertEqual(data["schema_version"], 5)
         self.assertEqual(len(data["columns"]), 3)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 
@@ -313,6 +313,62 @@ class HttpApiTests(unittest.TestCase):
         files = [os.path.join(root, name) for root, _, names in os.walk(self.attachments_dir) for name in names]
         self.assertEqual(files, [])
 
+    def test_permanent_delete_active_and_archived_cards_with_conflicts_and_attachments(self):
+        first = self.create_card("第一张")["card"]
+        target_result = self.create_card("永久删除")
+        target = target_result["card"]
+        self.create_card("第三张")
+        status, _, body = self.upload(target["id"], "gone.txt", b"gone")
+        self.assertEqual(status, 201)
+        stale = {"expected_version": target["version"], "expected_board_revision": target_result["revision"] - 1}
+        status, _, body = self.request("DELETE", f"/api/cards/{target['id']}/permanent", stale)
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"]["code"], "BOARD_REVISION_CONFLICT")
+        current = self.get_board()
+        current_target = next(card for card in current["cards"] if card["id"] == target["id"])
+        status, _, body = self.request("DELETE", f"/api/cards/{target['id']}/permanent", {
+            "expected_version": current_target["version"], "expected_board_revision": current["revision"],
+        })
+        self.assertEqual(status, 200)
+        deleted = json.loads(body)
+        self.assertTrue(deleted["ok"])
+        board = self.get_board()
+        self.assertEqual([(card["id"], card["position"]) for card in board["cards"]], [(first["id"], 0), (board["cards"][1]["id"], 1)])
+        self.assertFalse(os.path.exists(app.attachment_directory(target["id"])))
+
+        archived_result = self.create_card("归档后永久删除")
+        archived = archived_result["card"]
+        status, _, body = self.request("DELETE", f"/api/cards/{archived['id']}", {
+            "expected_version": archived["version"], "expected_board_revision": archived_result["revision"],
+        })
+        self.assertEqual(status, 200)
+        archive_response = json.loads(body)
+        status, _, body = self.request("DELETE", f"/api/cards/{archived['id']}/permanent", {
+            "expected_version": archive_response["version"], "expected_board_revision": archive_response["revision"],
+        })
+        self.assertEqual(status, 200)
+        status, _, body = self.request("GET", f"/api/cards/{archived['id']}")
+        self.assertEqual(status, 404)
+
+    def test_permanent_delete_requires_both_tokens(self):
+        card = self.create_card()["card"]
+        board = self.get_board()
+        for payload, code in (({"expected_version": card["version"]}, "INVALID_BOARD_REVISION"), ({"expected_board_revision": board["revision"]}, "INVALID_VERSION")):
+            with self.subTest(code=code):
+                status, _, body = self.request("DELETE", f"/api/cards/{card['id']}/permanent", payload)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body)["error"]["code"], code)
+
+    def test_static_assets_require_revalidation(self):
+        for path in (
+            "/", "/index.html", "/static/style.css", "/static/theme-init.js",
+            "/static/kanban.js", "/static/js/state.js",
+        ):
+            with self.subTest(path=path):
+                status, headers, _ = self.raw_request("GET", path)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Cache-Control"], "no-cache, max-age=0, must-revalidate")
+
     def test_options_has_empty_204_allow_and_security_headers(self):
         status, headers, body = self.raw_request("OPTIONS", "/api/cards/1")
         self.assertEqual(status, 204)
@@ -325,6 +381,11 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn("default-src 'self'", csp)
         self.assertIn("script-src 'self'", csp)
         self.assertNotIn("script-src 'self' 'unsafe-inline'", csp)
+
+        status, headers, body = self.raw_request("OPTIONS", "/api/cards/1/permanent")
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        self.assertEqual(headers["Allow"], "DELETE, OPTIONS")
 
     def test_backup_with_missing_attachment_returns_incomplete_backup_json(self):
         created = self.create_card("缺失附件备份")

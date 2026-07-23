@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="douban-classic">
+<html lang="zh-CN" data-theme="sea-salt-blue">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -108,15 +108,15 @@
             <section class="settings-section" aria-labelledby="board-display-title">
                 <div class="settings-section-heading">
                     <h3 id="board-display-title">看板显示</h3>
-                    <p>调整卡片在看板中的信息密度。</p>
+                    <p>调整卡片在看板中的信息密度；此设置不会裁剪或修改已保存的描述内容。</p>
                 </div>
                 <fieldset class="settings-fieldset">
                     <legend>卡片描述</legend>
                     <div class="segmented-options description-options">
                         <label><input type="radio" name="card-description-display" value="none"><span>不展示</span></label>
                         <label><input type="radio" name="card-description-display" value="one-line"><span>展示一行</span></label>
-                        <label><input type="radio" name="card-description-display" value="two-lines"><span>展示两行</span></label>
-                        <label><input type="radio" name="card-description-display" value="full" checked><span>全展示</span></label>
+                        <label><input type="radio" name="card-description-display" value="two-lines" checked><span>展示两行</span></label>
+                        <label><input type="radio" name="card-description-display" value="full"><span>全展示</span></label>
                     </div>
                 </fieldset>
             </section>
@@ -129,11 +129,12 @@
                 <fieldset class="settings-fieldset">
                     <legend>主题</legend>
                     <div id="theme-options" class="theme-options">
-                        <label><input type="radio" name="theme" value="douban-classic" data-theme-value="douban-classic"><span class="theme-option-content"><span class="theme-swatch theme-swatch-classic"></span><span>豆瓣绿</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="dark-tech" data-theme-value="dark-tech"><span class="theme-option-content"><span class="theme-swatch theme-swatch-dark"></span><span>暗夜黑</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="office" data-theme-value="office"><span class="theme-option-content"><span class="theme-swatch theme-swatch-office"></span><span>简约灰</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="cloud-blue" data-theme-value="cloud-blue"><span class="theme-option-content"><span class="theme-swatch theme-swatch-cloud"></span><span>云端蓝</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="aurora-blue" data-theme-value="aurora-blue"><span class="theme-option-content"><span class="theme-swatch theme-swatch-aurora"></span><span>极光紫</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="sea-salt-blue" data-theme-value="sea-salt-blue"><span class="theme-option-content"><span class="theme-swatch theme-swatch-sea"></span><span>海盐蓝</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="douban-green" data-theme-value="douban-green"><span class="theme-option-content"><span class="theme-swatch theme-swatch-douban"></span><span>豆瓣绿</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="swiss-mono" data-theme-value="swiss-mono"><span class="theme-option-content"><span class="theme-swatch theme-swatch-swiss"></span><span>瑞士黑白</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="warm-paper" data-theme-value="warm-paper"><span class="theme-option-content"><span class="theme-swatch theme-swatch-paper"></span><span>奶油陶土</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="liquid-glass" data-theme-value="liquid-glass"><span class="theme-option-content"><span class="theme-swatch theme-swatch-glass"></span><span>液态玻璃</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="deep-sea-night" data-theme-value="deep-sea-night"><span class="theme-option-content"><span class="theme-swatch theme-swatch-night"></span><span>深海夜</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
                     </div>
                 </fieldset>
             </section>
@@ -158,8 +159,9 @@
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title-text">
             <div class="modal-header">
                 <h2 id="modal-title-text">编辑卡片</h2>
-                <button id="card-archive-button" class="icon-btn danger card-archive-btn" aria-label="归档卡片" title="归档卡片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg></button>
-                <button id="card-close-button" class="icon-btn" aria-label="关闭卡片编辑" title="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                <button id="card-archive-button" class="icon-btn card-archive-btn" type="button" aria-label="归档卡片" title="归档卡片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"/></svg></button>
+                <button id="card-permanent-delete-button" class="icon-btn danger card-permanent-delete-btn" type="button" aria-label="永久删除卡片" title="永久删除卡片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg></button>
+                <button id="card-close-button" class="icon-btn" type="button" aria-label="关闭卡片编辑" title="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
             </div>
             <div class="modal-body">
                 <label>标题 <span class="req">*</span>

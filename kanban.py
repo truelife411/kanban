@@ -31,7 +31,7 @@ BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 ATTACHMENTS_DIR = os.path.join(BASE_DIR, "attachments")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("KANBAN_PORT", "8000"))
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 EXPORT_VERSION = 2
 MAX_JSON_BODY = 1024 * 1024
 MAX_IMPORT_BODY = 10 * 1024 * 1024
@@ -237,7 +237,7 @@ class SafeHtmlParser(HTMLParser):
     allowed = {"p", "br", "ul", "ol", "li", "strong", "b", "em", "i", "u", "s", "span"}
     blocked_tags = {"script", "style", "iframe", "object", "svg"}
     text_color_classes = {"rt-fg-default", "rt-fg-red", "rt-fg-yellow", "rt-fg-green", "rt-fg-blue", "rt-fg-purple"}
-    highlight_classes = {"rt-bg-clear", "rt-bg-red", "rt-bg-yellow", "rt-bg-green", "rt-bg-blue", "rt-bg-purple"}
+    highlight_classes = {"rt-bg-red", "rt-bg-yellow", "rt-bg-green", "rt-bg-blue", "rt-bg-purple"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -291,8 +291,43 @@ class SafeHtmlParser(HTMLParser):
             self.stack[-1][2].append(data)
 
     @staticmethod
-    def _empty_block(children):
-        return not any(not isinstance(child, str) or child.strip() for child in children)
+    def _has_content(nodes):
+        for node in nodes:
+            if isinstance(node, str):
+                if node.strip():
+                    return True
+            elif node[0] == "br" or SafeHtmlParser._has_content(node[2]):
+                return True
+        return False
+
+    def _canonical_nodes(self, nodes):
+        result = []
+        for node in nodes:
+            if isinstance(node, str):
+                result.append(node)
+                continue
+            tag, classes, children = node
+            children = self._canonical_nodes(children)
+            if tag == "span":
+                if not self._has_content(children):
+                    continue
+                if not classes:
+                    result.extend(children)
+                    continue
+                flattened = []
+                for child in children:
+                    if not isinstance(child, str) and child[0] == "span" and child[1] == classes:
+                        flattened.extend(child[2])
+                    else:
+                        flattened.append(child)
+                children = flattened
+            current = (tag, classes, children)
+            if tag == "span" and result and not isinstance(result[-1], str) and result[-1][0] == "span" and result[-1][1] == classes:
+                previous = result[-1]
+                result[-1] = ("span", classes, previous[2] + children)
+            else:
+                result.append(current)
+        return result
 
     def _render(self, nodes, parent=None):
         output = []
@@ -309,17 +344,17 @@ class SafeHtmlParser(HTMLParser):
                 output.append(rendered)
                 continue
             if tag == "span":
-                output.append("<span class=\"%s\">%s</span>" % (" ".join(classes), rendered) if classes else rendered)
+                output.append("<span class=\"%s\">%s</span>" % (" ".join(classes), rendered))
                 continue
             normalized_tag = "p" if tag == "div" else tag
-            if normalized_tag == "p" and self._empty_block(children):
+            if normalized_tag == "p" and not self._has_content(children):
                 rendered = "<br>"
             output.append("<%s>%s</%s>" % (normalized_tag, rendered, normalized_tag))
         return "".join(output)
 
     @property
     def output(self):
-        return self._render(self.root)
+        return self._render(self._canonical_nodes(self.root))
 
 
 def sanitize_description(value):
@@ -568,8 +603,12 @@ def _rotate_database_backups():
 
 def create_backup(prefix="auto", required=True):
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    final_path = os.path.join(BACKUP_DIR, "kanban-%s-%s.db" % (prefix, stamp))
+    while True:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        final_path = os.path.join(BACKUP_DIR, "kanban-%s-%s.db" % (prefix, stamp))
+        if not os.path.exists(final_path):
+            break
+        time.sleep(0.000001)
     fd, temp_path = tempfile.mkstemp(prefix=".kanban-", suffix=".tmp", dir=BACKUP_DIR)
     os.close(fd)
     try:
@@ -624,6 +663,26 @@ def cleanup_expired_drafts(conn, now=None):
 def reconcile_attachments(conn):
     report = {"missing": [], "orphans": [], "size_mismatch": [], "cleanup": []}
     os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+    for name in os.listdir(ATTACHMENTS_DIR):
+        if ".permanent-delete-" not in name:
+            continue
+        rollback = os.path.join(ATTACHMENTS_DIR, name)
+        if not os.path.isdir(rollback):
+            continue
+        original_name = name.split(".permanent-delete-", 1)[0]
+        if not original_name.isdigit():
+            continue
+        original = attachment_directory(int(original_name))
+        card_exists = conn.execute("SELECT 1 FROM cards WHERE id=?", (int(original_name),)).fetchone() is not None
+        try:
+            if card_exists and not os.path.exists(original):
+                os.replace(rollback, original)
+                report["cleanup"].append(original)
+            elif not card_exists:
+                shutil.rmtree(rollback)
+                report["cleanup"].append(rollback)
+        except OSError:
+            pass
     known = {}
     for row in conn.execute("SELECT id,card_id,file_name,size FROM attachments"):
         path = attachment_path(row["card_id"], row["file_name"])
@@ -714,7 +773,7 @@ def init_db():
                 conn.execute("CREATE INDEX idx_cards_draft_updated ON cards(is_draft,updated_at,id)")
                 conn.execute("INSERT INTO board_state VALUES (1,1,?)", (now_iso(),))
                 conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
-                conn.execute("PRAGMA user_version = 4")
+                conn.execute("PRAGMA user_version = 5")
         else:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -769,6 +828,14 @@ def init_db():
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_draft_updated ON cards(is_draft,updated_at,id)")
                     conn.execute("PRAGMA user_version = 4")
                 version = 4
+            if version < 5:
+                with transaction(conn):
+                    for row in conn.execute("SELECT id,description FROM cards"):
+                        normalized = sanitize_description(row["description"] or "")
+                        if normalized != row["description"]:
+                            conn.execute("UPDATE cards SET description=? WHERE id=?", (normalized, row["id"]))
+                    conn.execute("PRAGMA user_version = 5")
+                version = 5
             with transaction(conn):
                 if not _column_exists(conn, "cards", "is_draft"):
                     conn.execute("ALTER TABLE cards ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
@@ -1116,6 +1183,51 @@ def archive_card(conn, cid, data=None):
         conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='manual',updated_at=?,version=version+1 WHERE id=?", (ts, ts, cid))
         _rewrite_positions(conn, row["column_id"], _active_card_ids(conn, row["column_id"])); revision = bump_revision(conn)
     return {"ok": True, "column_id": row["column_id"], "position": row["position"], "version": row["version"] + 1, "revision": revision}
+
+
+def permanently_delete_card(conn, cid, data=None):
+    data = require_object(data or {})
+    directory = attachment_directory(cid)
+    rollback = directory + ".permanent-delete-" + uuid.uuid4().hex
+    moved = False
+    committed = False
+    with DB_MAINTENANCE_LOCK:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=0", (cid,)).fetchone()
+                if row is None:
+                    raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
+                check_version(row, data.get("expected_version"), required=True)
+                check_revision(conn, data.get("expected_board_revision"), required=True)
+                if os.path.isdir(directory):
+                    os.replace(directory, rollback)
+                    moved = True
+                conn.execute("DELETE FROM cards WHERE id=? AND is_draft=0", (cid,))
+                if not row["archived"]:
+                    _rewrite_positions(conn, row["column_id"], _active_card_ids(conn, row["column_id"]))
+                revision = bump_revision(conn)
+                conn.commit()
+                committed = True
+            except Exception:
+                conn.rollback()
+                if moved and os.path.isdir(rollback) and not os.path.exists(directory):
+                    os.replace(rollback, directory)
+                    moved = False
+                raise
+            if moved and os.path.isdir(rollback):
+                try:
+                    shutil.rmtree(rollback)
+                except OSError:
+                    MAINTENANCE_REPORT["cleanup"].append(rollback)
+            return {"ok": True, "revision": revision}
+        except Exception as error:
+            if not committed and moved and os.path.isdir(rollback) and not os.path.exists(directory):
+                try:
+                    os.replace(rollback, directory)
+                except OSError:
+                    pass
+            raise _file_in_use_error(error)
 
 
 def restore_card(conn, cid, data=None):
@@ -1730,9 +1842,11 @@ class Handler(BaseHTTPRequestHandler):
         if error.details is not None: payload["error"]["details"] = error.details
         self._send_json(payload, error.status)
 
-    def _send_text(self, data, status=200, content_type="text/plain; charset=utf-8"):
+    def _send_text(self, data, status=200, content_type="text/plain; charset=utf-8", cache_control=None):
         body = data.encode("utf-8") if isinstance(data, str) else data; self.send_response(status)
-        self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self._security_headers(); self.end_headers(); self.wfile.write(body)
+        self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body)))
+        if cache_control: self.send_header("Cache-Control", cache_control)
+        self._security_headers(); self.end_headers(); self.wfile.write(body)
 
     def _content_length(self, maximum=None):
         if self.headers.get_all("Transfer-Encoding"):
@@ -1767,7 +1881,7 @@ class Handler(BaseHTTPRequestHandler):
         if os.path.commonpath((os.path.abspath(STATIC_DIR), os.path.abspath(file_path))) != os.path.abspath(STATIC_DIR): return self._send_text("Forbidden", 403)
         if not os.path.isfile(file_path): return self._send_text("Not Found", 404)
         ctype = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml"}.get(os.path.splitext(file_path)[1].lower(), "application/octet-stream")
-        with open(file_path, "rb") as handle: self._send_text(handle.read(), content_type=ctype)
+        with open(file_path, "rb") as handle: self._send_text(handle.read(), content_type=ctype, cache_control="no-cache, max-age=0, must-revalidate")
 
     def _send_attachment(self, row):
         path = attachment_path(row["card_id"], row["file_name"])
@@ -1847,6 +1961,8 @@ class Handler(BaseHTTPRequestHandler):
                 if method == "GET": return self._send_json(get_card(conn, cid))
                 if method == "PUT": return self._send_json(update_card(conn, cid, self._read_json_body()))
                 if method == "DELETE": return self._send_json(archive_card(conn, cid, self._read_json_body()))
+            match = re.fullmatch(r"/api/cards/(\d+)/permanent", path)
+            if match and method == "DELETE": return self._send_json(permanently_delete_card(conn, int(match.group(1)), self._read_json_body()))
             for suffix, action, verb in (("move", move_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST"), ("finalize", finalize_card_draft, "PUT")):
                 match = re.fullmatch(r"/api/cards/(\d+)/%s" % suffix, path)
                 if match and method == verb: return self._send_json(action(conn, int(match.group(1)), self._read_json_body()))
@@ -1911,6 +2027,8 @@ class Handler(BaseHTTPRequestHandler):
             return "POST, OPTIONS"
         if re.fullmatch(r"/api/cards/\d+", path):
             return "GET, PUT, DELETE, OPTIONS"
+        if re.fullmatch(r"/api/cards/\d+/permanent", path):
+            return "DELETE, OPTIONS"
         if re.fullmatch(r"/api/cards/\d+/(?:restore|copy)", path):
             return "POST, OPTIONS"
         if re.fullmatch(r"/api/cards/\d+/(?:move|finalize)", path):

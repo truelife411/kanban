@@ -1,3 +1,4 @@
+import re
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
@@ -81,30 +82,82 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('event.key==="ArrowRight"', app_js)
         self.assertIn('event.key==="ArrowLeft"', app_js)
 
-    def test_theme_settings_and_five_themes_exist(self):
+    def test_theme_settings_and_six_themes_exist(self):
+        theme_init_js = (ROOT / "static" / "theme-init.js").read_text(encoding="utf-8")
+        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        themes = ("sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "liquid-glass", "deep-sea-night")
+        legacy_themes = (
+            "cloud-blue", "navy-blue", "aurora-blue", "douban-classic",
+            "douban-modern", "office", "dark-tech",
+        )
         self.assertIn('id="view-settings"', self.html)
         self.assertIn('id="theme-options"', self.html)
         self.assertNotIn('id="theme-button"', self.html)
         self.assertNotIn('id="theme-menu"', self.html)
-        self.assertIn('data-theme="douban-classic"', self.html)
-        for theme in ("douban-classic", "dark-tech", "office", "cloud-blue", "aurora-blue"):
-            self.assertIn(theme, self.html)
-        self.assertNotIn("douban-modern", self.html)
-        self.assertNotIn("navy-blue", self.html)
-        self.assertIn("豆瓣绿", self.html)
-        self.assertIn("暗夜黑", self.html)
-        self.assertIn("简约灰", self.html)
-        self.assertIn("极光紫", self.html)
-        for removed_name in ("经典豆瓣绿", "现代豆瓣绿", "海军蓝", "深色科技", "简约办公", "极光蓝紫"):
-            self.assertNotIn(removed_name, self.html)
-        for selector in ('data-theme="dark-tech"', 'data-theme="office"', 'data-theme="cloud-blue"', 'data-theme="aurora-blue"'):
-            self.assertIn(selector, self.css)
+        self.assertIn('data-theme="sea-salt-blue"', self.html)
+        for theme, name in zip(themes, ("海盐蓝", "豆瓣绿", "瑞士黑白", "奶油陶土", "液态玻璃", "深海夜")):
+            self.assertIn(f'value="{theme}"', self.html)
+            self.assertIn(f'data-theme-value="{theme}"', self.html)
+            self.assertIn(name, self.html)
+            self.assertIn(f'"{theme}"', theme_init_js)
+            self.assertIn(f'"{theme}"', app_js)
+            self.assertEqual(len(re.findall(rf':root\[data-theme="{re.escape(theme)}"\]\s*\{{', self.css)), 1)
+        for legacy_theme in legacy_themes:
+            self.assertNotIn(legacy_theme, self.html)
+            self.assertNotIn(f'data-theme="{legacy_theme}"', self.css)
+        expected_migrations = {
+            "cloud-blue": "sea-salt-blue",
+            "navy-blue": "sea-salt-blue",
+            "aurora-blue": "sea-salt-blue",
+            "douban-classic": "douban-green",
+            "douban-modern": "douban-green",
+            "office": "swiss-mono",
+            "dark-tech": "deep-sea-night",
+        }
+        for old_theme, new_theme in expected_migrations.items():
+            with self.subTest(old_theme=old_theme, new_theme=new_theme):
+                mapping_pattern = rf'["\']{re.escape(old_theme)}["\']\s*:\s*["\']{re.escape(new_theme)}["\']'
+                self.assertRegex(theme_init_js, mapping_pattern)
+                self.assertRegex(app_js, mapping_pattern)
+
         compact_css = "".join(self.css.split())
-        self.assertIn(".history-view{width:100%;max-width:none;min-height:calc(100vh-48px);margin:0;", compact_css)
-        self.assertIn(':root[data-theme="dark-tech"].board-view,:root[data-theme="dark-tech"].history-view{', compact_css)
-        self.assertIn(':root[data-theme="office"].board-view,:root[data-theme="office"].history-view{', compact_css)
-        self.assertIn(':root[data-theme="cloud-blue"].board-view,:root[data-theme="cloud-blue"].history-view{', compact_css)
-        self.assertIn(':root[data-theme="aurora-blue"].board-view,:root[data-theme="aurora-blue"].history-view{', compact_css)
+        for theme in themes:
+            block = re.search(rf':root\[data-theme="{re.escape(theme)}"\]\s*\{{([^}}]+)\}}', self.css, re.S)
+            self.assertIsNotNone(block)
+            declarations = block.group(1)
+            for token in ("--bg", "--board-bg", "--col-bg", "--text", "--text-light", "--border", "--primary"):
+                self.assertRegex(declarations, rf'{re.escape(token)}\s*:')
+        self.assertIn("background:var(--bg)", compact_css)
+        self.assertIn("color:var(--text)", compact_css)
+        self.assertIn("border", compact_css)
+        self.assertIn("var(--border)", compact_css)
+        self.assertIn(':root[data-theme="sea-salt-blue"].board-view', compact_css)
+        self.assertIn(':root[data-theme="douban-green"].topbar', compact_css)
+        self.assertIn(':root[data-theme="swiss-mono"]', compact_css)
+        self.assertIn("font-family:", compact_css[compact_css.index(':root[data-theme="swiss-mono"]'):])
+        self.assertIn(':root[data-theme="warm-paper"].board-view', compact_css)
+        self.assertIn("linear-gradient", compact_css[compact_css.index(':root[data-theme="warm-paper"].board-view'):])
+        liquid_glass_start = compact_css.index(':root[data-theme="liquid-glass"]')
+        liquid_glass_end = compact_css.find(':root[data-theme="deep-sea-night"]', liquid_glass_start)
+        liquid_glass_tokens = compact_css[liquid_glass_start:liquid_glass_end]
+        for color in ("red", "yellow", "green", "blue", "purple"):
+            self.assertIn(f"--rt-fg-{color}:", liquid_glass_tokens)
+            self.assertIn(f"--rt-bg-{color}:", liquid_glass_tokens)
+            self.assertIn(f"--rt-bg-{color}-text:", liquid_glass_tokens)
+        self.assertIn(':root[data-theme="liquid-glass"].board-view', compact_css)
+        self.assertIn("radial-gradient", compact_css[compact_css.index(':root[data-theme="liquid-glass"]body'):])
+        self.assertIn('@supports((backdrop-filter:blur(1px))or(-webkit-backdrop-filter:blur(1px)))', compact_css)
+        self.assertIn('-webkit-backdrop-filter:blur(22px)saturate(155%)', compact_css)
+        self.assertIn('backdrop-filter:blur(22px)saturate(155%)', compact_css)
+        self.assertIn('@media(prefers-contrast:more)', compact_css)
+        self.assertIn('@media(forced-colors:active)', compact_css)
+        self.assertIn(':root[data-theme="liquid-glass"].modal{background:rgba(248,252,255,.97);-webkit-backdrop-filter:none;backdrop-filter:none;}', compact_css)
+        glass_card_rule = re.search(r':root\[data-theme="liquid-glass"\]\s+\.card,([^\{]+)\{([^}]+)\}', self.css, re.S)
+        self.assertIsNotNone(glass_card_rule)
+        self.assertNotIn("backdrop-filter", glass_card_rule.group(2))
+        deep_sea_block = compact_css[compact_css.index(':root[data-theme="deep-sea-night"]'):]
+        self.assertIn('color-scheme:dark', deep_sea_block)
+        self.assertIn(':root[data-theme="deep-sea-night"].card', deep_sea_block)
 
     def test_attachment_ui_contract(self):
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
@@ -149,10 +202,13 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn("clearHistoryDate", dates_js)
         self.assertIn("起始日期不能晚于结束日期", app_js)
         self.assertIn("calendarDayNumber", dates_js)
-        self.assertIn("openNativePicker", dates_js)
+        self.assertIn("openDateTimePicker", dates_js)
+        self.assertIn('role", "dialog', dates_js)
+        self.assertIn('event.key === "Escape"', dates_js)
+        self.assertIn("dateAllowed", dates_js)
+        self.assertNotIn("showPicker", dates_js)
         self.assertIn("syncCardDateControl", dates_js)
         self.assertIn("clearCardDate", dates_js)
-        self.assertIn("showPicker", dates_js)
         self.assertIn("syncCardTimeControl", dates_js)
         self.assertIn("clearCardTime", dates_js)
         self.assertIn("请先选择截止日期", app_js)
@@ -212,18 +268,67 @@ class AccessibilityContractTests(unittest.TestCase):
             self.assertIn(color_class, self.html)
             self.assertIn(color_class, self.css)
         self.assertIn(".editor.rt-fg-red,.card-desc.rt-fg-red,.result-desc.rt-fg-red", compact_css)
-        self.assertIn("--rt-fg-red:#ff0000", compact_css)
-        self.assertIn("--rt-fg-yellow:#ffff00", compact_css)
-        self.assertIn("--rt-fg-green:#166534", compact_css)
-        self.assertIn("--rt-fg-blue:#1d4ed8", compact_css)
-        self.assertIn("--rt-fg-purple:#6b21a8", compact_css)
-        self.assertIn("--rt-bg-red:#ff0000", compact_css)
-        self.assertIn("--rt-bg-yellow:#ffff00", compact_css)
-        self.assertIn("--rt-bg-green:#dcfce7", compact_css)
-        self.assertIn("--rt-bg-blue:#dbeafe", compact_css)
-        self.assertIn("--rt-bg-purple:#f3e8ff", compact_css)
-        self.assertIn(':root[data-theme="dark-tech"]{--rt-fg-green:#86efac;', compact_css)
+        for color in ("red", "yellow", "green", "blue", "purple"):
+            self.assertIn(f"--rt-fg-{color}:", compact_css)
+            self.assertIn(f"--rt-bg-{color}:", compact_css)
+            self.assertIn(f"--rt-bg-{color}-text:", compact_css)
+            background_rule = re.search(rf'\.rt-bg-{color}\s*\{{([^}}]+)\}}', self.css, re.S)
+            self.assertIsNotNone(background_rule)
+            declarations = "".join(background_rule.group(1).split())
+            self.assertIn(f"background:var(--rt-bg-{color})", declarations)
+            self.assertIn(f"color:var(--rt-bg-{color}-text)", declarations)
+        deep_sea_start = compact_css.index(':root[data-theme="deep-sea-night"]')
+        deep_sea_end = compact_css.find(':root[data-theme="', deep_sea_start + 1)
+        deep_sea_tokens = compact_css[deep_sea_start:deep_sea_end if deep_sea_end >= 0 else len(compact_css)]
+        for color in ("red", "yellow", "green", "blue", "purple"):
+            self.assertIn(f"--rt-fg-{color}:", deep_sea_tokens)
+            self.assertIn(f"--rt-bg-{color}:", deep_sea_tokens)
+            self.assertIn(f"--rt-bg-{color}-text:", deep_sea_tokens)
+        self.assertNotIn("--rt-fg-red:#ff0000", compact_css)
+        self.assertNotIn("--rt-fg-yellow:#ffff00", compact_css)
+        self.assertNotIn("--rt-bg-red:#ff0000", compact_css)
+        self.assertNotIn("--rt-bg-yellow:#ffff00", compact_css)
         self.assertNotIn("rt-fg-amber", self.html + self.css + app_js)
+        self.assertNotIn("rt-bg-clear", self.html + self.css + app_js)
+        self.assertIn("splitRangeBoundaries", app_js)
+        self.assertIn("removeColorFromFragment", app_js)
+        self.assertIn("normalizeColorDom", app_js)
+        self.assertNotIn('padding-inline:.08em', compact_css)
+
+    def test_archive_and_permanent_delete_contract(self):
+        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        ui_js = (ROOT / "static" / "js" / "ui.js").read_text(encoding="utf-8")
+        compact_css = "".join(self.css.split())
+        self.assertIn('id="card-archive-button"', self.html)
+        self.assertIn('id="card-permanent-delete-button"', self.html)
+        self.assertIn('d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"', self.html)
+        self.assertIn("archiveCurrentCard", app_js)
+        self.assertNotIn("deleteCurrentCard", app_js)
+        self.assertIn('`/api/cards/${card.id}/permanent`', app_js)
+        self.assertIn("permanentlyDeleteCard(card,{fromHistory:true,unsaved:false})", app_js)
+        self.assertIn("附件：${count} 个", app_js)
+        self.assertIn("未保存修改", app_js)
+        self.assertIn("此操作不可撤销", app_js)
+        self.assertIn('focus:"cancel"', app_js)
+        self.assertIn('focus === "cancel"', ui_js)
+        self.assertIn("history-permanent-delete", app_js)
+        self.assertIn('remove.innerHTML=\'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg>\'', app_js)
+        self.assertIn('remove.title="永久删除卡片"', app_js)
+        self.assertNotIn('remove.textContent="永久删除"', app_js)
+        self.assertIn('primaryClass:"ghost"', app_js)
+        self.assertNotIn('danger:true', app_js)
+        self.assertIn('primaryButton.className = primaryClass ||', ui_js)
+        self.assertNotIn("opacity:0", compact_css[compact_css.index(".history-card-actions.history-permanent-delete{"):compact_css.index(".history-card-actions.history-permanent-delete{") + 500])
+        self.assertIn('if(!card.archived){const actions=document.createElement("div");actions.className="result-actions history-card-actions"', app_js)
+
+    def test_svg_icon_contract_replaces_legacy_emoji(self):
+        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        markup = self.html + app_js
+        for class_name in ("svg-icon", "column-action-icon", "card-meta-icon"):
+            self.assertIn(class_name, markup)
+        self.assertRegex(markup, r'<svg[^>]+class=["\'][^"\']*(?:svg-icon|column-action-icon|card-meta-icon)')
+        for legacy_icon in ("📎", "📅", "✎", "🗑"):
+            self.assertNotIn(legacy_icon, markup)
 
     def test_settings_and_card_description_preference_contract(self):
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
@@ -234,12 +339,14 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertLess(self.html.index('id="view-settings"'), self.html.index('id="import-button"'))
         for value in ("none", "one-line", "two-lines", "full"):
             self.assertIn(f'value="{value}"', self.html)
-        self.assertIn('value="full" checked', self.html)
-        self.assertIn('cardDescriptionDisplay: "full"', state_js)
+        self.assertIn('value="two-lines" checked', self.html)
+        self.assertIn('cardDescriptionDisplay: "two-lines"', state_js)
         self.assertIn('CARD_DESCRIPTION_STORAGE_KEY="kanban-card-description-display"', app_js)
         self.assertIn("CARD_DESCRIPTION_OPTIONS.has(value)", app_js)
         self.assertIn("localStorage.getItem(CARD_DESCRIPTION_STORAGE_KEY)", app_js)
         self.assertIn("localStorage.setItem(CARD_DESCRIPTION_STORAGE_KEY,state.cardDescriptionDisplay)", app_js)
+        self.assertRegex(app_js, r'CARD_DESCRIPTION_OPTIONS\.has\(value\)\?value:"two-lines"')
+        self.assertRegex(app_js, r'catch\(_\)\{state\.cardDescriptionDisplay="two-lines"\}')
         self.assertLess(app_js.index("loadCardDescriptionPreference()"), app_js.index("refresh(true)"))
         self.assertIn('state.cardDescriptionDisplay!=="none"', app_js)
         self.assertIn('description.classList.add(state.cardDescriptionDisplay)', app_js)
@@ -274,22 +381,33 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn("clearChildren(dueBox)", app_js)
         self.assertNotIn(".replaceChildren()", app_js)
         compact_css = "".join(self.css.split())
-        self.assertIn(".board-view{height:calc(100vh-48px);display:flex;flex-direction:column;", compact_css)
-        self.assertIn(".board{display:flex;gap:12px;align-items:flex-start;flex:1;min-height:0;", compact_css)
+        self.assertIn(".board-view{", compact_css)
+        self.assertIn("display:flex", compact_css[compact_css.index(".board-view{"):compact_css.index(".board-view{") + 300])
+        self.assertIn("flex-direction:column", compact_css[compact_css.index(".board-view{"):compact_css.index(".board-view{") + 300])
+        self.assertIn(".board{display:flex;", compact_css)
+        self.assertIn("flex:1", compact_css[compact_css.index(".board{display:flex;"):compact_css.index(".board{display:flex;") + 300])
+        self.assertIn("min-height:0", compact_css[compact_css.index(".board{display:flex;"):compact_css.index(".board{display:flex;") + 300])
         self.assertNotIn(".filter-reorder-hint{flex:0 0 100%", compact_css)
-        self.assertNotIn(".board{height:calc(100%-", compact_css)
+        self.assertNotRegex(compact_css, r"\.board\{[^}]*height:calc\(")
 
-    def test_native_picker_progressive_enhancement_contract(self):
+    def test_application_owned_picker_contract(self):
         dates_js = (ROOT / "static" / "js" / "dates.js").read_text(encoding="utf-8")
+        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
         compact_css = "".join(self.css.split())
         self.assertIn("input.disabled || input.readOnly", dates_js)
-        self.assertIn('typeof input.showPicker === "function"', dates_js)
-        self.assertIn("input.focus()", dates_js)
-        self.assertNotIn("input.click()", dates_js)
-        self.assertIn("appearance:auto;-webkit-appearance:auto", compact_css)
-        self.assertIn("::-webkit-calendar-picker-indicator{display:block;opacity:1", compact_css)
-        self.assertIn(".date-clear-btn,.time-clear-btn{position:absolute;right:32px", compact_css)
-        self.assertIn(".history-date-clear{position:absolute;right:27px", compact_css)
+        self.assertIn("openDateTimePicker", dates_js)
+        self.assertNotIn("showPicker", dates_js)
+        for label in ("今天", "现在", "清除", "取消", "确定"):
+            self.assertIn(f'"{label}"', dates_js)
+        self.assertIn('event.key === "Escape"', dates_js)
+        self.assertIn('event.key !== "Tab"', dates_js)
+        self.assertIn("dateAllowed", dates_js)
+        self.assertIn("input.min", dates_js)
+        self.assertIn("input.max", dates_js)
+        self.assertIn("dispatchPickerInput", dates_js)
+        self.assertIn("event.currentTarget", app_js)
+        self.assertIn(".owned-picker-overlay{position:fixed", compact_css)
+        self.assertIn(".owned-picker-day[aria-selected=\"true\"]", compact_css)
 
     def test_per_column_sort_contract(self):
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
