@@ -817,17 +817,30 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
     --rt-bg-blue:#dfeaea; --rt-bg-blue-text:#3d5962; --rt-bg-purple:#ebe1e9; --rt-bg-purple-text:#574155;
 }
 :root[data-theme="liquid-glass"] {
-    color-scheme:light; --bg:#dcebf6; --board-bg:#dcebf6; --col-bg:rgba(244,249,253,.82); --col-header:#17334d; --text:#173047; --text-light:#61778a;
-    --border:rgba(255,255,255,.72); --primary:#2678bd; --primary-hover:#175f9c; --danger:#bd5360; --danger-hover:#9f3f4b; --green:#438269; --orange:#ae743a; --red:#bd5360;
-    --surface-card:rgba(255,255,255,.88); --surface-control:rgba(247,251,255,.84); --surface-menu:rgba(248,252,255,.94); --accent-soft:rgba(72,147,205,.14); --focus-ring:rgba(38,120,189,.24); --text-on-accent:#fff;
-    --radius-control:12px; --radius-card:15px; --radius-column:20px; --shadow:0 10px 30px rgba(42,79,108,.12),inset 0 1px 0 rgba(255,255,255,.75); --shadow-hover:0 16px 38px rgba(42,79,108,.17),inset 0 1px 0 rgba(255,255,255,.9);
-    --card-hover-transform:translateY(-2px); --drag-card-transform:scale(.985); --drop-indicator:#2678bd;
-    --label-0-bg:#dcefe5; --label-0-text:#356b55; --label-1-bg:#dbeaf4; --label-1-text:#366985; --label-2-bg:#f3e9c9; --label-2-text:#755d24;
-    --label-3-bg:#f4dcdf; --label-3-text:#874650; --label-4-bg:#e9def3; --label-4-text:#675079; --label-5-bg:#d9eeee; --label-5-text:#396d70;
-    --label-6-bg:#f2e1d2; --label-6-text:#80553b; --label-7-bg:#e5e9ed; --label-7-text:#596875; --label-8-bg:#e1e4f4; --label-8-text:#565f83; --label-9-bg:#e2efdc; --label-9-text:#4d6e43;
-    --rt-fg-red:#a94350; --rt-fg-yellow:#74591a; --rt-fg-green:#367057; --rt-fg-blue:#286b9d; --rt-fg-purple:#6d4f83;
-    --rt-bg-red:#f3dde1; --rt-bg-red-text:#77333d; --rt-bg-yellow:#f3e9c8; --rt-bg-yellow-text:#5d470f; --rt-bg-green:#dcece4; --rt-bg-green-text:#2d5a47;
-    --rt-bg-blue:#dceaf4; --rt-bg-blue-text:#24577d; --rt-bg-purple:#e9e0f0; --rt-bg-purple-text:#573f69;
+    color-scheme:light;
+    /* iOS System Backgrounds */
+    --bg:#f2f2f7; --board-bg:#f2f2f7; --col-bg:rgba(255,255,255,.68); --col-header:#1c1c1e; --text:#1c1c1e; --text-light:#8e8e93;
+    --border:rgba(60,60,67,.16);
+    /* iOS System Colors — Blue / Red / Green / Orange */
+    --primary:#007aff; --primary-hover:#0060df; --danger:#ff3b30; --danger-hover:#d70015; --green:#34c759; --orange:#ff9500; --red:#ff3b30;
+    /* iOS Materials — translucent white over blurred backdrop */
+    --surface-card:rgba(255,255,255,.86); --surface-control:rgba(255,255,255,.74); --surface-menu:rgba(255,255,255,.96); --accent-soft:rgba(0,122,255,.1); --focus-ring:rgba(0,122,255,.28); --text-on-accent:#fff;
+    /* iOS Geometry — continuous-curve radius (squircle approximation) */
+    --radius-control:10px; --radius-card:14px; --radius-column:18px;
+    /* iOS Shadows — ultra-subtle, tinted, layered */
+    --shadow:0 1px 3px rgba(0,0,0,.03),0 3px 10px rgba(0,0,0,.04);
+    --shadow-hover:0 2px 6px rgba(0,0,0,.04),0 7px 18px rgba(0,0,0,.06);
+    --card-hover-transform:translateY(-1px); --drag-card-transform:scale(.985); --drop-indicator:#007aff;
+    /* Label palette — iOS-tinted pastels */
+    --label-0-bg:#e8f5e9; --label-0-text:#2e7d32; --label-1-bg:#e3f2fd; --label-1-text:#1565c0; --label-2-bg:#fff3e0; --label-2-text:#e65100;
+    --label-3-bg:#fce4ec; --label-3-text:#c62828; --label-4-bg:#f3e5f5; --label-4-text:#6a1b9a; --label-5-bg:#e0f7fa; --label-5-text:#00695c;
+    --label-6-bg:#fff8e1; --label-6-text:#f57f17; --label-7-bg:#eceff1; --label-7-text:#37474f; --label-8-bg:#e8eaf6; --label-8-text:#283593;
+    --label-9-bg:#fbe9e7; --label-9-text:#bf360c;
+    /* Rich-text foreground — iOS accent palette */
+    --rt-fg-red:#ff3b30; --rt-fg-yellow:#ff9500; --rt-fg-green:#34c759; --rt-fg-blue:#007aff; --rt-fg-purple:#af52de;
+    /* Rich-text background — iOS fill palette */
+    --rt-bg-red:#fce4ec; --rt-bg-red-text:#c62828; --rt-bg-yellow:#fff3e0; --rt-bg-yellow-text:#e65100; --rt-bg-green:#e8f5e9; --rt-bg-green-text:#2e7d32;
+    --rt-bg-blue:#e3f2fd; --rt-bg-blue-text:#1565c0; --rt-bg-purple:#f3e5f5; --rt-bg-purple-text:#6a1b9a;
 }
 :root[data-theme="deep-sea-night"] {
     color-scheme:dark; --bg:#10151c; --board-bg:#10151c; --col-bg:#171e27; --col-header:#e1e8ef; --text:#e1e8ef; --text-light:#8998a8;
@@ -899,7 +912,11 @@ input[type=text],input[type=date],input[type=time],textarea,select,.editor { col
 input[type=text]:focus,input[type=date]:focus,input[type=time]:focus,textarea:focus,select:focus,.editor:focus { border-color:var(--primary); background:var(--surface-card); box-shadow:0 0 0 3px var(--focus-ring); }
 .editor-toolbar { border-color:var(--border); border-radius:var(--radius-control) var(--radius-control) 0 0; background:var(--surface-control); }
 .editor-toolbar button { color:var(--text-light); border-radius:var(--radius-control); } .editor-toolbar button:hover { color:var(--primary); background:var(--accent-soft); }
-.modal-overlay,.owned-picker-overlay { background:rgba(5,10,15,.55); backdrop-filter:none; }
+.modal-overlay,.owned-picker-overlay {
+    background:transparent!important;
+    -webkit-backdrop-filter:none!important;
+    backdrop-filter:none!important;
+}
 .modal,.owned-picker { color:var(--text); border:1px solid var(--border); border-radius:var(--radius-column); background:var(--surface-menu); box-shadow:0 22px 60px rgba(0,0,0,.24); }
 .modal-header,.modal-footer { border-color:var(--border); background:var(--surface-control); }
 .ghost { color:var(--text); border:1px solid var(--border); border-radius:var(--radius-control); background:var(--surface-control); } .ghost:hover { color:var(--primary); border-color:var(--primary); background:var(--accent-soft); }
@@ -915,7 +932,7 @@ input[type=text]:focus,input[type=date]:focus,input[type=time]:focus,textarea:fo
 button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,.editor:focus-visible { outline:2px solid var(--primary); outline-offset:2px; box-shadow:0 0 0 4px var(--focus-ring); }
 .theme-swatch { width:18px; height:18px; border:1px solid var(--border); border-radius:50%; } .theme-swatch-sea { background:#287da1; box-shadow:inset 0 0 0 4px #eef4f7; }
 .theme-swatch-douban { background:#007722; box-shadow:inset 0 0 0 4px #edf4ed; } .theme-swatch-swiss { background:linear-gradient(90deg,#111 50%,#fff 50%); }
-.theme-swatch-paper { background:#b45f4d; box-shadow:inset 0 0 0 4px #f7f3ee; } .theme-swatch-glass { background:linear-gradient(135deg,#8fd5f2 0%,#c9c4fa 52%,#fff 100%); box-shadow:inset 0 0 0 3px rgba(255,255,255,.66),0 1px 4px rgba(44,105,151,.22); } .theme-swatch-night { background:#10151c; box-shadow:inset 0 0 0 4px #5aa7d4; }
+.theme-swatch-paper { background:#b45f4d; box-shadow:inset 0 0 0 4px #f7f3ee; } .theme-swatch-glass { background:linear-gradient(135deg,#007aff 0%,#5e9eff 45%,#bfdaff 100%); box-shadow:inset 0 0 0 2px rgba(255,255,255,.55),0 1px 3px rgba(0,122,255,.25); } .theme-swatch-night { background:#10151c; box-shadow:inset 0 0 0 4px #5aa7d4; }
 :root[data-theme="sea-salt-blue"] body { background:radial-gradient(circle at 8% 4%,rgba(92,157,184,.11),transparent 28%),#e3edf2; }
 :root[data-theme="douban-green"] body { font-family:Arial,Helvetica,"PingFang SC","Microsoft YaHei",sans-serif; }
 :root[data-theme="douban-green"] .topbar { height:52px; box-shadow:none; } :root[data-theme="douban-green"] .view-tabs .nav-btn.active { border-bottom:3px solid var(--primary); }
@@ -925,37 +942,52 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
 :root[data-theme="swiss-mono"] .card:hover { border-color:#111; box-shadow:3px 3px 0 #111; } :root[data-theme="swiss-mono"] .card-label { border-color:#111; }
 :root[data-theme="warm-paper"] body { background:radial-gradient(circle at 10% 5%,rgba(180,95,77,.07),transparent 30%),linear-gradient(135deg,rgba(255,253,251,.28),transparent 48%),#eee8e1; }
 :root[data-theme="warm-paper"] .card { background:#fffdfb; } :root[data-theme="warm-paper"] .drop-placeholder { background:repeating-linear-gradient(90deg,var(--primary) 0 7px,transparent 7px 12px); }
+/* ────────── liquid-glass · iOS ────────── */
+/* iOS wallpaper-style background — subtle blue / lavender glow */
 :root[data-theme="liquid-glass"] body {
     background:
-        radial-gradient(circle at 10% 8%,rgba(115,211,239,.58),transparent 30%),
-        radial-gradient(circle at 88% 12%,rgba(186,167,241,.48),transparent 34%),
-        radial-gradient(circle at 66% 88%,rgba(126,212,193,.34),transparent 36%),
-        linear-gradient(145deg,#d7edf7 0%,#e8e5f6 48%,#d9eef0 100%);
+        radial-gradient(ellipse 80% 60% at 15% 8%,rgba(0,122,255,.07),transparent 50%),
+        radial-gradient(ellipse 60% 46% at 82% 90%,rgba(175,82,222,.05),transparent 52%),
+        radial-gradient(ellipse 70% 36% at 50% 46%,rgba(255,255,255,.28),transparent 54%),
+        #f2f2f7;
     background-attachment:fixed;
 }
+/* ── Chrome surfaces (topbar / filters / menus) → iOS ultraThinMaterial ── */
 :root[data-theme="liquid-glass"] .topbar,
 :root[data-theme="liquid-glass"] .board-filters,
 :root[data-theme="liquid-glass"] .column-sort-menu,
 :root[data-theme="liquid-glass"] .history-sort-menu,
 :root[data-theme="liquid-glass"] .rich-color-menu,
-:root[data-theme="liquid-glass"] .auto-archive-tooltip,
-:root[data-theme="liquid-glass"] .modal,
-:root[data-theme="liquid-glass"] .owned-picker,
-:root[data-theme="liquid-glass"] .toast {
-    border-color:rgba(255,255,255,.74);
-    background:rgba(247,251,255,.94);
-    box-shadow:0 18px 48px rgba(44,82,112,.17),inset 0 1px 0 rgba(255,255,255,.92);
+:root[data-theme="liquid-glass"] .auto-archive-tooltip {
+    border-color:rgba(255,255,255,.68);
+    border-bottom-color:rgba(60,60,67,.1);
+    background:rgba(252,252,252,.78);
+    box-shadow:0 1px 4px rgba(0,0,0,.02),0 4px 12px rgba(0,0,0,.04);
 }
-:root[data-theme="liquid-glass"] .topbar { background:rgba(244,250,255,.92); }
-:root[data-theme="liquid-glass"] .board-filters { background:rgba(244,250,255,.9); }
+:root[data-theme="liquid-glass"] .topbar { background:rgba(250,250,252,.82); border-bottom-color:rgba(60,60,67,.14); }
+:root[data-theme="liquid-glass"] .board-filters { background:rgba(252,252,252,.76); }
+/* ── Modal / sheet → iOS thickMaterial ── */
+:root[data-theme="liquid-glass"] .modal,
+:root[data-theme="liquid-glass"] .owned-picker {
+    border-color:rgba(255,255,255,.72);
+    background:rgba(254,254,254,.96);
+    box-shadow:0 0 0 0.5px rgba(0,0,0,.04),0 12px 40px rgba(0,0,0,.12);
+}
+:root[data-theme="liquid-glass"] .toast {
+    border-color:rgba(255,255,255,.7);
+    background:rgba(252,252,252,.92);
+    box-shadow:0 4px 20px rgba(0,0,0,.1);
+}
+/* ── Columns / panels → iOS thinMaterial ── */
 :root[data-theme="liquid-glass"] .column,
 :root[data-theme="liquid-glass"] .search-panel,
 :root[data-theme="liquid-glass"] .settings-heading,
 :root[data-theme="liquid-glass"] .settings-section {
-    border-color:rgba(255,255,255,.72);
-    background:rgba(242,248,252,.84);
-    box-shadow:0 14px 38px rgba(45,83,112,.13),inset 0 1px 0 rgba(255,255,255,.86);
+    border-color:rgba(255,255,255,.66);
+    background:rgba(255,255,255,.74);
+    box-shadow:0 1px 3px rgba(0,0,0,.02),0 6px 18px rgba(0,0,0,.05);
 }
+/* ── Cards / items → iOS systemMaterial ── */
 :root[data-theme="liquid-glass"] .card,
 :root[data-theme="liquid-glass"] .result-item,
 :root[data-theme="liquid-glass"] .quick-card-form,
@@ -964,10 +996,11 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
 :root[data-theme="liquid-glass"] .theme-option-content,
 :root[data-theme="liquid-glass"] .segmented-options label span,
 :root[data-theme="liquid-glass"] .settings-action {
-    border-color:rgba(255,255,255,.8);
+    border-color:rgba(255,255,255,.72);
     background:rgba(255,255,255,.88);
-    box-shadow:0 8px 24px rgba(47,84,111,.1),inset 0 1px 0 #fff;
+    box-shadow:0 1px 2px rgba(0,0,0,.02),0 3px 10px rgba(0,0,0,.04);
 }
+/* ── Form inputs → iOS fill (inset material) ── */
 :root[data-theme="liquid-glass"] input[type=text],
 :root[data-theme="liquid-glass"] input[type=date],
 :root[data-theme="liquid-glass"] input[type=time],
@@ -977,70 +1010,157 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
 :root[data-theme="liquid-glass"] .date-input-shell,
 :root[data-theme="liquid-glass"] .history-date-range,
 :root[data-theme="liquid-glass"] .history-date-shell {
-    border-color:rgba(255,255,255,.82);
-    background:rgba(250,253,255,.86);
-    box-shadow:inset 0 1px 2px rgba(41,75,101,.08),0 1px 0 rgba(255,255,255,.8);
+    border-color:rgba(60,60,67,.14);
+    background:rgba(245,245,250,.82);
+    box-shadow:none;
 }
+:root[data-theme="liquid-glass"] input[type=text]:focus,
+:root[data-theme="liquid-glass"] input[type=date]:focus,
+:root[data-theme="liquid-glass"] input[type=time]:focus,
+:root[data-theme="liquid-glass"] textarea:focus,
+:root[data-theme="liquid-glass"] select:focus,
+:root[data-theme="liquid-glass"] .editor:focus {
+    border-color:var(--primary);
+    background:rgba(255,255,255,.92);
+    box-shadow:0 0 0 4px var(--focus-ring);
+}
+/* ── Primary buttons → iOS filled blue ── */
 :root[data-theme="liquid-glass"] .logo-mark,
 :root[data-theme="liquid-glass"] .icon-btn.add-btn,
 :root[data-theme="liquid-glass"] .primary,
 :root[data-theme="liquid-glass"] .result-actions button,
 :root[data-theme="liquid-glass"] .search-panel>.history-search-btn {
-    background:linear-gradient(135deg,rgba(59,143,207,.96),rgba(86,111,203,.94));
-    box-shadow:0 7px 20px rgba(38,103,163,.24),inset 0 1px 0 rgba(255,255,255,.34);
+    background:linear-gradient(175deg,#0088ff 0%,#006ae0 100%);
+    box-shadow:0 2px 8px rgba(0,122,255,.24);
+    border-color:transparent;
 }
+/* ── Secondary / icon buttons → iOS tinted ── */
 :root[data-theme="liquid-glass"] .icon-btn:not(.add-btn),
 :root[data-theme="liquid-glass"] .view-tabs .nav-btn.active {
-    border-color:rgba(255,255,255,.78);
-    background:rgba(255,255,255,.66);
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 4px 12px rgba(49,85,113,.08);
+    border-color:rgba(60,60,67,.16);
+    background:rgba(255,255,255,.74);
+    box-shadow:none;
 }
+:root[data-theme="liquid-glass"] .icon-btn:not(.add-btn):hover {
+    border-color:rgba(0,122,255,.28);
+    background:rgba(255,255,255,.88);
+}
+/* ── Modal overlay → iOS dimming + blur ── */
 :root[data-theme="liquid-glass"] .modal-overlay,
-:root[data-theme="liquid-glass"] .owned-picker-overlay { background:rgba(48,72,94,.24); }
+:root[data-theme="liquid-glass"] .owned-picker-overlay {
+    background:rgba(0,0,0,.28);
+}
+
+/* ── backdrop-filter progressive enhancement ── */
 @supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) {
+    /* Chrome surfaces · ultraThinMaterial */
     :root[data-theme="liquid-glass"] .topbar,
     :root[data-theme="liquid-glass"] .board-filters,
     :root[data-theme="liquid-glass"] .column-sort-menu,
     :root[data-theme="liquid-glass"] .history-sort-menu,
     :root[data-theme="liquid-glass"] .rich-color-menu,
-    :root[data-theme="liquid-glass"] .auto-archive-tooltip,
-    :root[data-theme="liquid-glass"] .modal,
-    :root[data-theme="liquid-glass"] .owned-picker,
-    :root[data-theme="liquid-glass"] .toast {
-        background:rgba(247,251,255,.66);
-        -webkit-backdrop-filter:blur(22px) saturate(155%);
-        backdrop-filter:blur(22px) saturate(155%);
+    :root[data-theme="liquid-glass"] .auto-archive-tooltip {
+        background:rgba(252,252,252,.62);
+        -webkit-backdrop-filter:blur(27px) saturate(185%);
+        backdrop-filter:blur(27px) saturate(185%);
     }
-    :root[data-theme="liquid-glass"] .topbar,
-    :root[data-theme="liquid-glass"] .board-filters { background:rgba(244,250,255,.6); }
+    :root[data-theme="liquid-glass"] .topbar { background:rgba(250,250,252,.64); }
+    :root[data-theme="liquid-glass"] .board-filters { background:rgba(252,252,252,.58); }
+    /* Columns · thinMaterial */
+    :root[data-theme="liquid-glass"] .column,
+    :root[data-theme="liquid-glass"] .search-panel,
+    :root[data-theme="liquid-glass"] .settings-heading,
+    :root[data-theme="liquid-glass"] .settings-section {
+        background:rgba(255,255,255,.56);
+        -webkit-backdrop-filter:blur(20px) saturate(170%);
+        backdrop-filter:blur(20px) saturate(170%);
+    }
+    /* Cards · systemMaterial */
+    :root[data-theme="liquid-glass"] .card,
+    :root[data-theme="liquid-glass"] .result-item,
+    :root[data-theme="liquid-glass"] .quick-card-form,
+    :root[data-theme="liquid-glass"] .attachment-item,
+    :root[data-theme="liquid-glass"] .history-attachment {
+        background:rgba(255,255,255,.7);
+        -webkit-backdrop-filter:blur(13px) saturate(155%);
+        backdrop-filter:blur(13px) saturate(155%);
+    }
+    /* Modal · thickMaterial */
+    :root[data-theme="liquid-glass"] .modal,
+    :root[data-theme="liquid-glass"] .owned-picker {
+        background:rgba(254,254,254,.82);
+        -webkit-backdrop-filter:blur(35px) saturate(200%);
+        backdrop-filter:blur(35px) saturate(200%);
+    }
+    :root[data-theme="liquid-glass"] .toast {
+        background:rgba(252,252,252,.74);
+        -webkit-backdrop-filter:blur(18px) saturate(160%);
+        backdrop-filter:blur(18px) saturate(160%);
+    }
+    /* Dimming overlay */
     :root[data-theme="liquid-glass"] .modal-overlay,
     :root[data-theme="liquid-glass"] .owned-picker-overlay {
-        -webkit-backdrop-filter:blur(8px) saturate(120%);
-        backdrop-filter:blur(8px) saturate(120%);
+        background:rgba(0,0,0,.22);
+        -webkit-backdrop-filter:blur(5px) saturate(120%);
+        backdrop-filter:blur(5px) saturate(120%);
+    }
+    /* Form inputs · subtle inset blur */
+    :root[data-theme="liquid-glass"] input[type=text],
+    :root[data-theme="liquid-glass"] input[type=date],
+    :root[data-theme="liquid-glass"] input[type=time],
+    :root[data-theme="liquid-glass"] textarea,
+    :root[data-theme="liquid-glass"] select,
+    :root[data-theme="liquid-glass"] .editor {
+        background:rgba(242,242,247,.7);
+        -webkit-backdrop-filter:blur(8px) saturate(140%);
+        backdrop-filter:blur(8px) saturate(140%);
     }
 }
+
+/* ── Mobile — reduce blur for performance ── */
 @media (max-width:720px) {
     :root[data-theme="liquid-glass"] body,
     :root[data-theme="liquid-glass"] .board-view,
     :root[data-theme="liquid-glass"] .history-view,
     :root[data-theme="liquid-glass"] .settings-view { background-attachment:scroll; }
-    :root[data-theme="liquid-glass"] .modal { background:rgba(248,252,255,.97); -webkit-backdrop-filter:none; backdrop-filter:none; }
+    :root[data-theme="liquid-glass"] .modal {
+        background:rgba(254,254,254,.98);
+        -webkit-backdrop-filter:none;
+        backdrop-filter:none;
+    }
     @supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) {
         :root[data-theme="liquid-glass"] .topbar,
         :root[data-theme="liquid-glass"] .board-filters,
         :root[data-theme="liquid-glass"] .owned-picker,
-        :root[data-theme="liquid-glass"] .toast { -webkit-backdrop-filter:blur(14px) saturate(135%); backdrop-filter:blur(14px) saturate(135%); }
+        :root[data-theme="liquid-glass"] .toast {
+            -webkit-backdrop-filter:blur(16px) saturate(155%);
+            backdrop-filter:blur(16px) saturate(155%);
+        }
+        :root[data-theme="liquid-glass"] .column {
+            -webkit-backdrop-filter:blur(12px) saturate(145%);
+            backdrop-filter:blur(12px) saturate(145%);
+        }
     }
 }
+
+/* ── Accessibility · prefers-contrast ── */
 @media (prefers-contrast:more) {
-    :root[data-theme="liquid-glass"] body { --border:rgba(35,74,104,.48); --text-light:#465f73; }
+    :root[data-theme="liquid-glass"] body {
+        --border:rgba(60,60,67,.4);
+        --text-light:#636366;
+    }
     :root[data-theme="liquid-glass"] .topbar,
     :root[data-theme="liquid-glass"] .board-filters,
     :root[data-theme="liquid-glass"] .column,
     :root[data-theme="liquid-glass"] .card,
     :root[data-theme="liquid-glass"] .modal,
-    :root[data-theme="liquid-glass"] .owned-picker { background:rgba(250,253,255,.96); border-color:rgba(35,74,104,.48); }
+    :root[data-theme="liquid-glass"] .owned-picker {
+        background:rgba(255,255,255,.96);
+        border-color:rgba(60,60,67,.4);
+    }
 }
+
+/* ── Accessibility · forced-colors ── */
 @media (forced-colors:active) {
     :root[data-theme="liquid-glass"] body,
     :root[data-theme="liquid-glass"] .board-view,
@@ -1051,7 +1171,14 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
     :root[data-theme="liquid-glass"] .column,
     :root[data-theme="liquid-glass"] .card,
     :root[data-theme="liquid-glass"] .modal,
-    :root[data-theme="liquid-glass"] .owned-picker { color:CanvasText; border-color:CanvasText; background:Canvas; box-shadow:none; -webkit-backdrop-filter:none; backdrop-filter:none; }
+    :root[data-theme="liquid-glass"] .owned-picker {
+        color:CanvasText;
+        border-color:CanvasText;
+        background:Canvas;
+        box-shadow:none;
+        -webkit-backdrop-filter:none;
+        backdrop-filter:none;
+    }
 }
 :root[data-theme="deep-sea-night"] body,:root[data-theme="deep-sea-night"] .board-view { background:#10151c; }
 :root[data-theme="deep-sea-night"] .topbar { background:#141b24; box-shadow:none; } :root[data-theme="deep-sea-night"] .card { background:#1d2631; box-shadow:none; }
