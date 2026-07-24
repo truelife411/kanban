@@ -38,6 +38,16 @@ export function splitDue(value) {
 export function joinDue(date, time) { return date ? date + (time ? ` ${time}` : "") : ""; }
 export function dueDisplay(value) { return value.trim(); }
 
+export function dueSortTimestamp(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2}))?$/.exec((value || "").trim());
+    if (!match) return null;
+    const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+    const hour = match[4] == null ? 23 : Number(match[4]), minute = match[5] == null ? 59 : Number(match[5]);
+    const date = new Date(year, month - 1, day, hour, minute);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day || date.getHours() !== hour || date.getMinutes() !== minute) return null;
+    return date.getTime();
+}
+
 export function parseLocalTimestamp(value) {
     const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec((value || "").trim());
     if (!match) return null;
