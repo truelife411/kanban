@@ -274,17 +274,25 @@ export function clearCardDate() { const input = document.getElementById("card-du
 export function clearCardTime() { const input = document.getElementById("card-due-time"); input.value = ""; syncCardTimeControl(); input.focus(); }
 
 export function syncHistoryDateControl(changed) {
-    const from = document.getElementById("search-from");
-    const to = document.getElementById("search-to");
-    for (const [key, input] of [["from", from], ["to", to]]) syncShell(input, ".history-date-shell", `search-${key}-clear`, "has-date");
-    to.min = from.value || "";
-    from.max = to.value || "";
-    if (changed === "from" && from.value && to.value && from.value > to.value) to.value = from.value;
-    if (changed === "to" && from.value && to.value && from.value > to.value) from.value = to.value;
+    const groups = [
+        { key: "from", pair: "to", fromId: "search-from", toId: "search-to" },
+        { key: "created_from", pair: "created_to", fromId: "search-created-from", toId: "search-created-to" },
+        { key: "updated_from", pair: "updated_to", fromId: "search-updated-from", toId: "search-updated-to" },
+    ];
+    for (const group of groups) {
+        const from = document.getElementById(group.fromId);
+        const to = document.getElementById(group.toId);
+        for (const [key, input] of [[group.key, from], [group.pair, to]]) syncShell(input, ".history-date-shell", `search-${key}-clear`.replace(/_/g, "-"), "has-date");
+        to.min = from.value || "";
+        from.max = to.value || "";
+        if (changed === group.key && from.value && to.value && from.value > to.value) to.value = from.value;
+        if (changed === group.pair && from.value && to.value && from.value > to.value) from.value = to.value;
+    }
 }
 
 export function clearHistoryDate(which) {
-    const input = document.getElementById(`search-${which}`);
+    const id = `search-${which.replace(/_/g, "-")}`;
+    const input = document.getElementById(id);
     input.value = "";
     syncHistoryDateControl(which);
     input.focus();

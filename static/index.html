@@ -45,8 +45,12 @@
     <!-- ============ 历史搜索视图 ============ -->
     <main id="view-history" class="history-view" role="tabpanel" aria-labelledby="btn-history" tabindex="0" hidden>
         <div class="search-panel">
-            <input type="text" id="search-q" placeholder="搜索标题 / 描述 / 标签 / 附件名称…">
-            <label>优先级
+            <label class="history-filter-field history-keyword-field">
+                <span>关键词</span>
+                <input type="text" id="search-q" placeholder="搜索标题 / 描述 / 标签 / 附件名称…">
+            </label>
+            <label class="history-filter-field history-priority-field">
+                <span>优先级</span>
                 <select id="search-priority">
                     <option value="">全部</option>
                     <option value="high">高</option>
@@ -54,30 +58,67 @@
                     <option value="low">低</option>
                 </select>
             </label>
-            <div class="history-date-range" role="group" aria-label="截止日期范围">
-                <label class="date-control date-control-compact">
-                    <span>截止从</span>
-                    <span class="history-date-shell">
-                        <button id="search-from-trigger" class="history-date-trigger" type="button" title="选择起始日期" aria-label="打开截止日期从选择器">
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
-                        </button>
-                        <input type="date" id="search-from" aria-label="截止日期从">
-                        <button class="history-date-clear" id="search-from-clear" type="button" title="清除起始日期" aria-label="清除截止日期从" hidden>×</button>
-                    </span>
-                </label>
-                <span class="date-range-separator" aria-hidden="true">至</span>
-                <label class="date-control date-control-compact">
-                    <span>截止到</span>
-                    <span class="history-date-shell">
-                        <button id="search-to-trigger" class="history-date-trigger" type="button" title="选择结束日期" aria-label="打开截止日期到选择器">
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
-                        </button>
-                        <input type="date" id="search-to" aria-label="截止日期到">
-                        <button class="history-date-clear" id="search-to-clear" type="button" title="清除结束日期" aria-label="清除截止日期到" hidden>×</button>
-                    </span>
-                </label>
-            </div>
-            <label class="checkbox"><input type="checkbox" id="search-all" checked> 包含未归档卡片</label>
+            <label class="history-filter-field date-control date-control-compact">
+                <span>截止日期从</span>
+                <span class="history-date-shell">
+                    <button id="search-from-trigger" class="history-date-trigger" type="button" title="选择起始日期" aria-label="打开截止日期从选择器">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
+                    </button>
+                    <input type="date" id="search-from" aria-label="截止日期从">
+                    <button class="history-date-clear" id="search-from-clear" type="button" title="清除起始日期" aria-label="清除截止日期从" hidden>×</button>
+                </span>
+            </label>
+            <label class="history-filter-field date-control date-control-compact">
+                <span>截止日期到</span>
+                <span class="history-date-shell">
+                    <button id="search-to-trigger" class="history-date-trigger" type="button" title="选择结束日期" aria-label="打开截止日期到选择器">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
+                    </button>
+                    <input type="date" id="search-to" aria-label="截止日期到">
+                    <button class="history-date-clear" id="search-to-clear" type="button" title="清除结束日期" aria-label="清除截止日期到" hidden>×</button>
+                </span>
+            </label>
+            <label class="history-filter-field date-control date-control-compact">
+                <span>创建日期从</span>
+                <span class="history-date-shell">
+                    <button id="search-created-from-trigger" class="history-date-trigger" type="button" title="选择起始日期" aria-label="打开创建日期从选择器">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
+                    </button>
+                    <input type="date" id="search-created-from" aria-label="创建日期从">
+                    <button class="history-date-clear" id="search-created-from-clear" type="button" title="清除起始日期" aria-label="清除创建日期从" hidden>×</button>
+                </span>
+            </label>
+            <label class="history-filter-field date-control date-control-compact">
+                <span>创建日期到</span>
+                <span class="history-date-shell">
+                    <button id="search-created-to-trigger" class="history-date-trigger" type="button" title="选择结束日期" aria-label="打开创建日期到选择器">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
+                    </button>
+                    <input type="date" id="search-created-to" aria-label="创建日期到">
+                    <button class="history-date-clear" id="search-created-to-clear" type="button" title="清除结束日期" aria-label="清除创建日期到" hidden>×</button>
+                </span>
+            </label>
+            <label class="history-filter-field date-control date-control-compact">
+                <span>更新日期从</span>
+                <span class="history-date-shell">
+                    <button id="search-updated-from-trigger" class="history-date-trigger" type="button" title="选择起始日期" aria-label="打开更新日期从选择器">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
+                    </button>
+                    <input type="date" id="search-updated-from" aria-label="更新日期从">
+                    <button class="history-date-clear" id="search-updated-from-clear" type="button" title="清除起始日期" aria-label="清除更新日期从" hidden>×</button>
+                </span>
+            </label>
+            <label class="history-filter-field date-control date-control-compact">
+                <span>更新日期到</span>
+                <span class="history-date-shell">
+                    <button id="search-updated-to-trigger" class="history-date-trigger" type="button" title="选择结束日期" aria-label="打开更新日期到选择器">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>
+                    </button>
+                    <input type="date" id="search-updated-to" aria-label="更新日期到">
+                    <button class="history-date-clear" id="search-updated-to-clear" type="button" title="清除结束日期" aria-label="清除更新日期到" hidden>×</button>
+                </span>
+            </label>
+            <label class="checkbox history-include-field"><input type="checkbox" id="search-all" checked> 包含未归档卡片</label>
             <div class="history-sort">
                 <button id="history-sort-button" class="history-sort-button" type="button" aria-haspopup="menu" aria-expanded="false">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h9M8 18h6M4 5v14m0 0-2.5-2.5M4 19l2.5-2.5"/></svg>
@@ -164,7 +205,7 @@
                 <button id="card-close-button" class="icon-btn" type="button" aria-label="关闭卡片编辑" title="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
             </div>
             <div class="modal-body">
-                <label>标题 <span class="req">*</span>
+                <label><span>标题 <span class="req">*</span></span>
                     <input type="text" id="card-title" placeholder="卡片标题">
                 </label>
                 <div class="field">
@@ -255,10 +296,9 @@
                         <option value="low">低</option>
                     </select>
                 </label>
-                <div class="field attachment-field" id="attachment-field" role="group" aria-labelledby="attachment-label">
-                    <span class="field-label" id="attachment-label">附件</span>
-                    <small class="attachment-help" id="attachment-help">文件保留原始名称；同一卡片内名称不区分英文字母大小写。附件上传、覆盖和删除会立即生效，不受卡片保存或取消影响。</small>
-                    <div id="attachment-list" class="attachment-list" aria-describedby="attachment-help"></div>
+                <div class="field attachment-field" id="attachment-field" role="group" aria-labelledby="attachment-label" aria-describedby="attachment-help">
+                    <span class="field-label" id="attachment-label"><span class="label-inline">附件 <small id="attachment-help">(文件保留原始名称。附件上传、覆盖和删除会立即生效，不受卡片保存或取消影响。)</small></span></span>
+                    <div id="attachment-list" class="attachment-list"></div>
                     <div id="attachment-queue" class="attachment-queue" aria-live="polite" aria-atomic="false"></div>
                     <button type="button" id="attachment-add-button" class="ghost attachment-add-btn">＋ 添加附件</button>
                     <input id="attachment-input" type="file" multiple hidden>
@@ -294,7 +334,7 @@
                 <button id="column-close-button" class="icon-btn" type="button" aria-label="关闭新增列"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
             </div>
             <div class="modal-body">
-                <label>列名 <span class="req">*</span>
+                <label><span>列名 <span class="req">*</span></span>
                     <input type="text" id="column-name" placeholder="如: 待办">
                 </label>
             </div>

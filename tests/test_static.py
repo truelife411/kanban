@@ -205,14 +205,13 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('id="card-date-clear"', self.html)
         self.assertIn('id="card-time-clear"', self.html)
         self.assertIn("date-picker-trigger", self.html)
-        self.assertIn("history-date-range", self.html)
+        self.assertIn("history-filter-field date-control", self.html)
         self.assertIn('id="search-from-clear"', self.html)
         self.assertIn('id="search-to-clear"', self.html)
         self.assertIn("history-date-trigger", self.html)
-        self.assertIn("date-range-separator", self.html)
         self.assertIn("input[type=time]", self.css)
         self.assertIn(".date-input-shell", self.css)
-        self.assertIn(".history-date-range", self.css)
+        self.assertIn(".history-date-shell", self.css)
         self.assertIn("syncHistoryDateControl", dates_js)
         self.assertIn("clearHistoryDate", dates_js)
         self.assertIn("起始日期不能晚于结束日期", app_js)
@@ -463,6 +462,43 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn("border-left-color: #eb5a46 !important", self.css)
         self.assertIn("border-left-color: #ff9f1a !important", self.css)
         self.assertIn("border-left-color: #61bd4f !important", self.css)
+
+    def test_history_filter_layout_contract(self):
+        ordered_ids = (
+            "search-q",
+            "search-priority",
+            "search-from",
+            "search-to",
+            "search-created-from",
+            "search-created-to",
+            "search-updated-from",
+            "search-updated-to",
+            "search-all",
+            "history-sort-button",
+        )
+        positions = [self.html.index(f'id="{element_id}"') for element_id in ordered_ids]
+        self.assertEqual(positions, sorted(positions))
+        for label in (
+            "关键词",
+            "优先级",
+            "截止日期从",
+            "截止日期到",
+            "创建日期从",
+            "创建日期到",
+            "更新日期从",
+            "更新日期到",
+        ):
+            self.assertIn(f"<span>{label}</span>", self.html)
+        self.assertIn("history-filter-field", self.html)
+        self.assertNotIn("history-date-stack", self.html)
+        self.assertIn(".search-panel { display:flex; flex-wrap:wrap; align-items:flex-end", self.css)
+        self.assertIn(".search-panel .date-control { display:flex; flex:0 1 190px; flex-direction:column", self.css)
+        self.assertIn("min-width:180px", self.css)
+        self.assertIn(':root[data-theme="liquid-glass"] .history-view .search-panel', self.css)
+        self.assertIn("z-index:40", self.css)
+        self.assertIn(':root[data-theme="deep-sea-night"] .history-sort-button', self.css)
+        self.assertIn(':root[data-theme="deep-sea-night"] .history-sort-menu', self.css)
+        self.assertIn("@media (max-width:380px)", self.css)
 
     def test_history_sort_and_full_timestamp_contract(self):
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")

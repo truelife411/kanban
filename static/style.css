@@ -367,7 +367,7 @@ input, textarea, select { font-family: inherit; font-size: 14px; }
 .history-sort-button { display:inline-flex; align-items:center; gap:7px; min-height:42px; padding:0 14px; border:1px solid var(--border); border-radius:999px; background:#fff; color:var(--text); font-size:13px; white-space:nowrap; }
 .history-sort-button svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
 .history-sort-button[aria-expanded="true"] { border-color:var(--primary); box-shadow:0 0 0 2px rgba(0,121,107,.12); }
-.history-sort-menu { position:absolute; z-index:30; right:0; top:calc(100% + 6px); min-width:154px; padding:5px; border:1px solid var(--border); border-radius:8px; background:#fff; box-shadow:0 10px 26px rgba(0,0,0,.16); }
+.history-sort-menu { position:absolute; z-index:50; right:0; top:calc(100% + 6px); min-width:154px; padding:5px; border:1px solid var(--border); border-radius:8px; background:#fff; box-shadow:0 10px 26px rgba(0,0,0,.16); }
 .history-sort-menu button { display:flex; width:100%; align-items:center; gap:7px; padding:8px 10px; border:0; border-radius:5px; background:transparent; color:var(--text); text-align:left; white-space:nowrap; }
 .history-sort-menu button:hover,.history-sort-menu button:focus-visible { background:var(--hover); }
 .history-sort-menu .sort-menu-check { width:14px; color:var(--primary); font-weight:700; }
@@ -679,6 +679,9 @@ textarea { resize: vertical; }
 .owned-time-fields { display:flex; align-items:center; justify-content:center; gap:10px; padding:18px 0; font-size:24px; }
 .owned-time-fields select { width:92px; min-height:48px; font-size:18px; text-align:center; }
 .date-range-separator { color:var(--text-light); font-size:12px; }
+.date-range-divider { margin: 0 2px; font-weight: 300; opacity: 0.5; }
+.date-group { display:flex; align-items:center; gap:5px; }
+.history-date-stack { display:flex; flex-direction:column; gap:8px; flex-shrink:0; }
 .move-controls { display: flex; flex-wrap: wrap; gap: 6px; }
 .move-controls .ghost { padding: 6px 10px; font-size: 12px; }
 .modal-body label small { font-weight: 400; color: var(--text-light); }
@@ -1066,6 +1069,16 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
     border-color:rgba(0,122,255,.28);
     background:rgba(255,255,255,.88);
 }
+/* 液态玻璃面板会因 backdrop-filter 建立独立层叠上下文；提升整个面板，让排序菜单悬浮覆盖搜索结果。 */
+:root[data-theme="liquid-glass"] .history-view .search-panel {
+    position:relative;
+    z-index:40;
+}
+:root[data-theme="liquid-glass"] .history-view .search-meta,
+:root[data-theme="liquid-glass"] .history-view .search-results {
+    position:relative;
+    z-index:1;
+}
 /* ── backdrop-filter progressive enhancement ── */
 @supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) {
     /* Chrome surfaces · ultraThinMaterial */
@@ -1191,6 +1204,37 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
 :root[data-theme="deep-sea-night"] body,:root[data-theme="deep-sea-night"] .board-view { background:#10151c; }
 :root[data-theme="deep-sea-night"] .topbar { background:#141b24; box-shadow:none; } :root[data-theme="deep-sea-night"] .card { background:#1d2631; box-shadow:none; }
 :root[data-theme="deep-sea-night"] .card:hover { border-color:#405367; box-shadow:none; }
+:root[data-theme="deep-sea-night"] .history-sort-button {
+    color:var(--text);
+    border-color:#3a4a5b;
+    background:#202a36;
+    box-shadow:none;
+}
+:root[data-theme="deep-sea-night"] .history-sort-button:hover {
+    color:#b9ddf1;
+    border-color:#52728a;
+    background:#263442;
+}
+:root[data-theme="deep-sea-night"] .history-sort-button[aria-expanded="true"] {
+    color:#c8e7f7;
+    border-color:var(--primary);
+    background:#263746;
+    box-shadow:0 0 0 3px var(--focus-ring);
+}
+:root[data-theme="deep-sea-night"] .history-sort-menu {
+    color:var(--text);
+    border-color:#3a4a5b;
+    background:#1b2530;
+    box-shadow:0 14px 32px rgba(0,0,0,.42);
+}
+:root[data-theme="deep-sea-night"] .history-sort-menu button {
+    color:var(--text);
+}
+:root[data-theme="deep-sea-night"] .history-sort-menu button:hover,
+:root[data-theme="deep-sea-night"] .history-sort-menu button:focus-visible {
+    color:#d4edf9;
+    background:#293a49;
+}
 :root[data-theme="deep-sea-night"] select,:root[data-theme="deep-sea-night"] select option,:root[data-theme="deep-sea-night"] input[type=date],:root[data-theme="deep-sea-night"] input[type=time] { color-scheme:dark; background:var(--surface-control); color:var(--text); }
 @media (max-width:720px) { .topbar { height:auto; min-height:56px; } .board-view { height:auto; } .view-tabs .nav-btn { width:140px; min-width:140px; } }
 
@@ -1203,12 +1247,12 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
 .inline-error { padding:14px; border:1px solid color-mix(in srgb,var(--danger) 35%,transparent); border-radius:8px; color:var(--danger); background:color-mix(in srgb,var(--danger) 7%,transparent); }
 .search-load-more { display:block; margin:16px auto; min-width:140px; }
 .attachment-item, .history-attachment { background:var(--col-bg,#fff); color:var(--text); }
-.attachment-meta, .attachment-help { color:var(--text-light); }
+.attachment-meta { color:var(--text-light); }
 .danger-text { color:var(--danger); }
 
 /* ===== 附件 ===== */
 .attachment-field { gap:8px; }
-.attachment-help { color:var(--text-light); line-height:1.5; }
+.attachment-field .field-label .label-inline small { font-weight: 400; color: var(--text-light); }
 .attachment-list, .attachment-queue, .history-attachments { display:grid; gap:8px; }
 .attachment-item, .history-attachment { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-control); background:var(--surface-card); }
 .attachment-main { min-width:0; flex:1; }
@@ -1235,18 +1279,38 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
 
 /* 日期和时间控件使用共享主题语义变量。 */
 
-/* 历史搜索主操作保持统一结构，外观由主题语义变量控制。 */
+/* 历史搜索条件依次自然换行，排序与搜索保持为最后两个控件。 */
 .history-view { padding-left:max(20px,calc((100vw - 1320px)/2)); padding-right:max(20px,calc((100vw - 1320px)/2)); }
-.search-panel { flex-wrap:nowrap; gap:10px; padding:14px; }
+.search-panel { display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px 10px; padding:14px; }
 .search-panel > * { flex-shrink:0; }
-.search-panel input[type=text] { flex:1 1 240px; min-width:180px; }
-.history-date-range { padding:4px 6px; gap:6px; }
-.search-panel .date-control { gap:5px; }
-.search-panel .date-control .history-date-shell input[type=date] { width:112px; }
-.search-panel > .history-search-btn { display:inline-flex; flex:0 0 auto; align-items:center; justify-content:center; gap:8px; min-width:118px; min-height:42px; padding:0 16px; font-weight:600; white-space:nowrap; }
+.history-filter-field { display:flex; flex-direction:column; align-items:stretch; gap:5px; margin:0; min-width:0; }
+.history-filter-field > span:first-child { color:var(--text-light); font-size:12px; font-weight:600; line-height:1.2; }
+.history-keyword-field { flex:1 1 260px; min-width:200px; }
+.history-priority-field { flex:0 1 128px; min-width:118px; }
+.history-keyword-field input, .history-priority-field select { width:100%; min-height:42px; box-sizing:border-box; }
+.search-panel .date-control { display:flex; flex:0 1 190px; flex-direction:column; align-items:stretch; gap:5px; min-width:180px; margin:0; }
+.search-panel .date-control .history-date-shell { width:100%; min-height:42px; box-sizing:border-box; }
+.search-panel .date-control .history-date-shell input[type=date] { width:100%; min-width:0; min-height:40px; box-sizing:border-box; font-size:13px; }
+.history-include-field { min-height:42px; align-items:center; white-space:nowrap; }
+.history-sort { align-self:flex-end; }
+.history-sort-button, .search-panel > .history-search-btn { min-height:42px; border-radius:7px; }
+.search-panel > .history-search-btn { display:inline-flex; flex:0 0 auto; align-items:center; justify-content:center; gap:8px; min-width:118px; padding:0 16px; font-weight:600; white-space:nowrap; }
 .search-panel > .history-search-btn svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; }
-@media (max-width:980px) { .search-panel { flex-wrap:wrap; } }
-@media (max-width:720px) { .search-panel > .history-search-btn { width:100%; min-height:46px; } }
+@media (max-width:720px) {
+    .history-keyword-field, .history-priority-field { flex-basis:100%; }
+    .search-panel .date-control { flex:1 1 calc(50% - 5px); min-width:145px; }
+    .search-panel .date-control .history-date-shell input[type=date] { font-size:12px; }
+    .history-include-field { flex:1 0 100%; }
+    .history-sort { flex:1 1 150px; }
+    .history-sort-button { width:100%; justify-content:center; }
+    .history-sort-menu { left:0; right:auto; min-width:100%; }
+    .search-panel > .history-search-btn { flex:0 1 auto; width:auto; min-height:42px; }
+}
+@media (max-width:380px) {
+    .search-panel .date-control { flex-basis:100%; }
+    .history-sort { flex-basis:100%; }
+    .search-panel > .history-search-btn { width:100%; }
+}
 
 /* ============ 设置视图 ============ */
 .settings-view {

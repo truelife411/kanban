@@ -157,7 +157,7 @@ export function chooseAction({ title, message, primary, secondary, danger = fals
         const cancelButton = document.getElementById("choice-cancel");
         primaryButton.textContent = primary;
         secondaryButton.textContent = secondary;
-        primaryButton.className = primaryClass || (danger ? "danger-action" : "primary");
+        primaryButton.className = primaryClass || (danger ? "ghost" : "primary");
         secondaryButton.hidden = !secondary;
         const inertTargets = [...document.querySelectorAll(".topbar, main, .modal-overlay:not([hidden]), .owned-picker-overlay:not([hidden])")].filter(node => node !== overlay);
         const inertState = inertTargets.map(node => [node, node.inert]);

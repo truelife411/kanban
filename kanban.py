@@ -1315,9 +1315,13 @@ def decode_search_cursor(value, sort):
         raise ApiError("搜索游标无效，请重新搜索", 400, "INVALID_CURSOR")
 
 
-def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, cursor=None, limit=50, sort="archived_desc"):
+def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, cursor=None, limit=50, sort="archived_desc", created_from=None, created_to=None, updated_from=None, updated_to=None):
     if date_from: validate_due_date(date_from)
     if date_to: validate_due_date(date_to)
+    if created_from: validate_due_date(created_from)
+    if created_to: validate_due_date(created_to)
+    if updated_from: validate_due_date(updated_from)
+    if updated_to: validate_due_date(updated_to)
     if priority: validate_priority(priority)
     if sort not in SEARCH_SORTS:
         raise ApiError("历史排序方式无效", 400, "INVALID_SORT")
@@ -1341,6 +1345,10 @@ def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, i
         params.extend(["%%%s%%" % q] * 3 + [name_query])
     if date_from: sql += " AND substr(cards.due_date,1,10)>=?"; params.append(date_from[:10])
     if date_to: sql += " AND substr(cards.due_date,1,10)<=?"; params.append(date_to[:10])
+    if created_from: sql += " AND substr(cards.created_at,1,10)>=?"; params.append(created_from[:10])
+    if created_to: sql += " AND substr(cards.created_at,1,10)<=?"; params.append(created_to[:10])
+    if updated_from: sql += " AND substr(cards.updated_at,1,10)>=?"; params.append(updated_from[:10])
+    if updated_to: sql += " AND substr(cards.updated_at,1,10)<=?"; params.append(updated_to[:10])
     if priority: sql += " AND cards.priority=?"; params.append(priority)
     decoded = decode_search_cursor(cursor, sort)
     null_rank_sql = "CASE WHEN cards.%s IS NULL THEN 1 ELSE 0 END" % sort_field
@@ -1366,8 +1374,8 @@ def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, i
     return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
 
 
-def search_cards(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, sort="archived_desc"):
-    return search_cards_page(conn, q, date_from, date_to, priority, include_active, sort=sort)["items"]
+def search_cards(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, sort="archived_desc", created_from=None, created_to=None, updated_from=None, updated_to=None):
+    return search_cards_page(conn, q, date_from, date_to, priority, include_active, sort=sort, created_from=created_from, created_to=created_to, updated_from=updated_from, updated_to=updated_to)["items"]
 
 
 def export_data(conn):
@@ -1999,7 +2007,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not version_header or not version_header.isdigit(): raise ApiError("附件版本无效", 400, "INVALID_VERSION")
                     return self._send_json(delete_attachment(conn, attachment_id, int(version_header)))
             if path == "/api/search" and method == "GET":
-                return self._send_json(search_cards_page(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true"), query.get("cursor", [None])[0], query.get("limit", [50])[0], query.get("sort", ["archived_desc"])[0]))
+                return self._send_json(search_cards_page(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true"), query.get("cursor", [None])[0], query.get("limit", [50])[0], query.get("sort", ["archived_desc"])[0], query.get("created_from", [None])[0], query.get("created_to", [None])[0], query.get("updated_from", [None])[0], query.get("updated_to", [None])[0]))
             if path == "/api/export" and method == "GET":
                 body = json.dumps(export_data(conn), ensure_ascii=False, indent=2).encode("utf-8"); filename = "kanban-export-%s.json" % datetime.now().strftime("%Y%m%d-%H%M%S")
                 self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename); self._security_headers(); self.end_headers(); self.wfile.write(body); return
