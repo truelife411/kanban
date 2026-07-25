@@ -1479,7 +1479,10 @@ def backup_readiness(conn):
             missing.append("attachments/%s/%s" % (row["card_id"], row["file_name"]))
     if missing:
         raise ApiError("完整备份所需附件缺失", 422, "INCOMPLETE_BACKUP", {"missing_attachments": missing})
-    return {"ok": True, "attachment_count": len(rows), "attachment_size": sum(row["size"] for row in rows)}
+    attachment_size = sum(row["size"] for row in rows)
+    database_size = os.path.getsize(DB_PATH) if os.path.isfile(DB_PATH) else 0
+    ensure_free_space(BACKUP_DIR, database_size * 2 + attachment_size)
+    return {"ok": True, "attachment_count": len(rows), "attachment_size": attachment_size}
 
 
 def create_full_backup(prefix="backup"):
@@ -1500,7 +1503,8 @@ def create_full_backup(prefix="backup"):
             attachment_manifest, missing = _zip_attachment_manifest(rows)
             if missing:
                 raise ApiError("完整备份所需附件缺失", 422, "INCOMPLETE_BACKUP", {"missing_attachments": missing})
-            ensure_free_space(BACKUP_DIR, os.path.getsize(db_snapshot))
+            required_output = os.path.getsize(db_snapshot) + sum(item["size"] for item in attachment_manifest)
+            ensure_free_space(BACKUP_DIR, required_output)
             with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as archive:
                 archive.write(db_snapshot, "kanban.db")
                 for item in attachment_manifest:

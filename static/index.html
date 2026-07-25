@@ -248,6 +248,21 @@
                         </span>
                     </div>
                 </label>
+                <label>优先级
+                    <select id="card-priority">
+                        <option value="high">高</option>
+                        <option value="medium" selected>中</option>
+                        <option value="low">低</option>
+                    </select>
+                </label>
+                <div class="field attachment-field" id="attachment-field" role="group" aria-labelledby="attachment-label">
+                    <span class="field-label" id="attachment-label">附件</span>
+                    <small class="attachment-help" id="attachment-help">文件保留原始名称；同一卡片内名称不区分英文字母大小写。附件上传、覆盖和删除会立即生效，不受卡片保存或取消影响。</small>
+                    <div id="attachment-list" class="attachment-list" aria-describedby="attachment-help"></div>
+                    <div id="attachment-queue" class="attachment-queue" aria-live="polite" aria-atomic="false"></div>
+                    <button type="button" id="attachment-add-button" class="ghost attachment-add-btn">＋ 添加附件</button>
+                    <input id="attachment-input" type="file" multiple hidden>
+                </div>
                 <label>所在列
                     <select id="card-column"></select>
                 </label>
@@ -260,21 +275,6 @@
                         <button type="button" class="ghost" data-move-direction="bottom">移到底部</button>
                     </div>
                 </div>
-                <div class="field attachment-field" id="attachment-field" role="group" aria-labelledby="attachment-label">
-                    <span class="field-label" id="attachment-label">附件</span>
-                    <small class="attachment-help" id="attachment-help">文件保留原始名称；同一卡片内名称不区分英文字母大小写。附件上传、覆盖和删除会立即生效，不受卡片保存或取消影响。</small>
-                    <div id="attachment-list" class="attachment-list" aria-describedby="attachment-help"></div>
-                    <div id="attachment-queue" class="attachment-queue" aria-live="polite" aria-atomic="false"></div>
-                    <button type="button" id="attachment-add-button" class="ghost attachment-add-btn">＋ 添加附件</button>
-                    <input id="attachment-input" type="file" multiple hidden>
-                </div>
-                <label>优先级
-                    <select id="card-priority">
-                        <option value="high">高</option>
-                        <option value="medium" selected>中</option>
-                        <option value="low">低</option>
-                    </select>
-                </label>
             </div>
             <div class="modal-footer">
                 <span id="card-meta" class="card-meta"></span>
@@ -291,7 +291,7 @@
         <div class="modal small" role="dialog" aria-modal="true" aria-labelledby="column-modal-title">
             <div class="modal-header">
                 <h2 id="column-modal-title">新增列</h2>
-                <button id="column-close-button" class="icon-btn" aria-label="关闭新增列"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                <button id="column-close-button" class="icon-btn" type="button" aria-label="关闭新增列"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
             </div>
             <div class="modal-body">
                 <label>列名 <span class="req">*</span>
