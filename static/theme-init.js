@@ -1,6 +1,6 @@
 (function () {
     var defaultTheme = "mint";
-    var themes = ["mint", "sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "terracotta", "tianqing", "dailan", "qunqing", "qiuxiang", "oat", "apricot", "pearl", "sandstone", "liquid-glass", "deep-sea-night", "aurora", "aurora-night"];
+    var themes = ["mint", "sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "terracotta", "tianqing", "dailan", "qunqing", "qiuxiang", "oat", "apricot", "pearl", "sandstone", "liquid-glass", "deep-sea-night", "aurora", "aurora-night", "aurora-glass", "pixel-arcade", "mushanzi", "matcha", "forest-night", "morandi", "mist-pine", "mist-pine-night"];
     var legacyThemes = {
         "cloud-blue": "sea-salt-blue",
         "navy-blue": "sea-salt-blue",

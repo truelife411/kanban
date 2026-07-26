@@ -52,15 +52,17 @@ class DatabaseTestCase(unittest.TestCase):
             "expected_board_revision": app.board_revision(self.conn),
         }
 
-    def create_card(self, column_id, title):
-        return app.create_card(self.conn, self.with_revision({
+    def create_card(self, column_id, title, **overrides):
+        payload = {
             "column_id": column_id,
             "title": title,
             "description": "",
             "labels": "",
             "due_date": "",
             "priority": "medium",
-        }))["card"]
+        }
+        payload.update(overrides)
+        return app.create_card(self.conn, self.with_revision(payload))["card"]
 
     def create_column(self, name):
         return app.create_column(self.conn, self.with_revision({"name": name}))["column"]
@@ -92,9 +94,14 @@ class ServerConfigurationTests(unittest.TestCase):
 
 class MigrationTests(DatabaseTestCase):
     def test_latest_schema_is_created(self):
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(len(app.list_columns(self.conn)), 3)
-        self.assertEqual(app.get_board(self.conn)["schema_version"], 5)
+        self.assertEqual(app.get_board(self.conn)["schema_version"], 6)
+        columns = {row["name"]: row for row in self.conn.execute("PRAGMA table_info(cards)")}
+        self.assertIn("planned_date", columns)
+        self.assertIn("planned_position", columns)
+        indexes = {row["name"] for row in self.conn.execute("PRAGMA index_list(cards)")}
+        self.assertIn("idx_cards_planned_date_position", indexes)
 
     def test_version_five_migration_normalizes_existing_descriptions_and_creates_backup(self):
         column = app.list_columns(self.conn)[0]
@@ -105,7 +112,7 @@ class MigrationTests(DatabaseTestCase):
         self.conn.close()
         app.init_db()
         self.conn = app.get_conn()
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(app.get_card(self.conn, card["id"])["description"], '<p><span class="rt-fg-red">甲乙</span></p>')
         self.assertTrue(any(name.startswith("kanban-pre-migration-") for name in os.listdir(self.backup_dir)))
 
@@ -240,6 +247,85 @@ class CardMovementTests(DatabaseTestCase):
         with self.assertRaises(app.ApiError) as raised:
             self.delete_column(columns[-1]["id"])
         self.assertEqual(raised.exception.code, "LAST_ACTIVE_COLUMN")
+
+
+class TodayPlanningTests(DatabaseTestCase):
+    DATE = "2026-07-26"
+
+    def planned_cards(self, planned_date=DATE):
+        return self.conn.execute(
+            "SELECT * FROM cards WHERE planned_date=? AND archived=0 AND is_draft=0 "
+            "ORDER BY planned_position,id",
+            (planned_date,),
+        ).fetchall()
+
+    def test_plan_card_add_reorder_and_remove_keeps_positions_contiguous(self):
+        column = app.list_columns(self.conn)[0]
+        cards = [self.create_card(column["id"], title) for title in ("A", "B", "C")]
+        for card in cards:
+            app.plan_card(self.conn, card["id"], self.with_card_tokens(card["id"], {
+                "planned_date": self.DATE,
+            }))
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("A", 0), ("B", 1), ("C", 2)],
+        )
+
+        app.plan_card(self.conn, cards[2]["id"], self.with_card_tokens(cards[2]["id"], {
+            "planned_date": self.DATE,
+            "position": 0,
+        }))
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("C", 0), ("A", 1), ("B", 2)],
+        )
+
+        app.plan_card(self.conn, cards[0]["id"], self.with_card_tokens(cards[0]["id"], {
+            "planned_date": "",
+        }))
+        removed = app.get_card(self.conn, cards[0]["id"])
+        self.assertEqual(removed["planned_date"], "")
+        self.assertIsNone(removed["planned_position"])
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("C", 0), ("B", 1)],
+        )
+
+    def test_plan_card_moves_between_dates_and_compacts_both_lists(self):
+        column = app.list_columns(self.conn)[0]
+        a = self.create_card(column["id"], "A", planned_date=self.DATE)
+        b = self.create_card(column["id"], "B", planned_date=self.DATE)
+        other_date = "2026-07-27"
+        c = self.create_card(column["id"], "C", planned_date=other_date)
+        app.plan_card(self.conn, a["id"], self.with_card_tokens(a["id"], {
+            "planned_date": other_date,
+            "position": 0,
+        }))
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("B", 0)],
+        )
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards(other_date)],
+            [("A", 0), ("C", 1)],
+        )
+
+    def test_import_export_preserves_planned_date_and_normalizes_position(self):
+        column = app.list_columns(self.conn)[0]
+        self.create_card(column["id"], "A", planned_date=self.DATE)
+        self.create_card(column["id"], "B", planned_date=self.DATE)
+        exported = app.export_data(self.conn)
+        planned = [card for card in exported["cards"] if card["planned_date"] == self.DATE]
+        self.assertEqual([card["planned_position"] for card in planned], [0, 1])
+        result = app.import_replace(self.conn, {
+            "data": exported,
+            "expected_board_revision": app.board_revision(self.conn),
+        })
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("A", 0), ("B", 1)],
+        )
 
 
 class ValidationTests(DatabaseTestCase):

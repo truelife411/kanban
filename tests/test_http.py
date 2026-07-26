@@ -133,7 +133,7 @@ class HttpApiTests(unittest.TestCase):
         status, headers, body = self.request("GET", "/api/board")
         data = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(data["schema_version"], 5)
+        self.assertEqual(data["schema_version"], 6)
         self.assertEqual(len(data["columns"]), 3)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 
@@ -359,6 +359,73 @@ class HttpApiTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertEqual(json.loads(body)["error"]["code"], code)
 
+    def test_plan_card_http_add_reorder_remove_and_board_snapshot(self):
+        first_result = self.create_card("今日 A")
+        second_result = self.create_card("今日 B")
+        first, second = first_result["card"], second_result["card"]
+        board = self.get_board()
+
+        status, _, body = self.request("PUT", f"/api/cards/{first['id']}/plan", {
+            "planned_date": "2026-07-26",
+            "expected_version": first["version"],
+            "expected_board_revision": board["revision"],
+        })
+        self.assertEqual(status, 200)
+        first_planned = json.loads(body)
+        self.assertEqual(first_planned["card"]["planned_date"], "2026-07-26")
+        self.assertEqual(first_planned["card"]["planned_position"], 0)
+
+        status, _, body = self.request("PUT", f"/api/cards/{second['id']}/plan", {
+            "planned_date": "2026-07-26",
+            "position": 0,
+            "expected_version": second["version"],
+            "expected_board_revision": first_planned["revision"],
+        })
+        self.assertEqual(status, 200)
+        second_planned = json.loads(body)
+        board = self.get_board()
+        planned = sorted(
+            (card for card in board["cards"] if card["planned_date"] == "2026-07-26"),
+            key=lambda card: card["planned_position"],
+        )
+        self.assertEqual(
+            [(card["title"], card["planned_position"]) for card in planned],
+            [("今日 B", 0), ("今日 A", 1)],
+        )
+
+        current_first = next(card for card in board["cards"] if card["id"] == first["id"])
+        status, _, body = self.request("PUT", f"/api/cards/{first['id']}/plan", {
+            "planned_date": "",
+            "expected_version": current_first["version"],
+            "expected_board_revision": second_planned["revision"],
+        })
+        self.assertEqual(status, 200)
+        removed = json.loads(body)["card"]
+        self.assertEqual(removed["planned_date"], "")
+        self.assertIsNone(removed["planned_position"])
+
+    def test_create_card_with_planned_date_supports_today_quick_add(self):
+        board = self.get_board()
+        payload = self.card_payload(board, "快速今日")
+        payload["planned_date"] = "2026-07-26"
+        status, _, body = self.request("POST", "/api/cards", payload)
+        self.assertEqual(status, 201)
+        card = json.loads(body)["card"]
+        self.assertEqual(card["planned_date"], "2026-07-26")
+        self.assertEqual(card["planned_position"], 0)
+
+    def test_plan_card_http_rejects_stale_version(self):
+        created = self.create_card("冲突今日")
+        card = created["card"]
+        board = self.get_board()
+        status, _, body = self.request("PUT", f"/api/cards/{card['id']}/plan", {
+            "planned_date": "2026-07-26",
+            "expected_version": card["version"] + 1,
+            "expected_board_revision": board["revision"],
+        })
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"]["code"], "CARD_VERSION_CONFLICT")
+
     def test_static_assets_require_revalidation(self):
         for path in (
             "/", "/index.html", "/static/style.css", "/static/theme-init.js",
@@ -381,6 +448,11 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn("default-src 'self'", csp)
         self.assertIn("script-src 'self'", csp)
         self.assertNotIn("script-src 'self' 'unsafe-inline'", csp)
+
+        status, headers, body = self.raw_request("OPTIONS", "/api/cards/1/plan")
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        self.assertEqual(headers["Allow"], "PUT, OPTIONS")
 
         status, headers, body = self.raw_request("OPTIONS", "/api/cards/1/permanent")
         self.assertEqual(status, 204)

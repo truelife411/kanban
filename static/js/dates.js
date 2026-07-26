@@ -2,6 +2,20 @@ export function localDateKey(date = new Date()) {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+export function addLocalDays(value, days) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+    if (!match) return "";
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    if (localDateKey(date) !== value) return "";
+    date.setDate(date.getDate() + days);
+    return localDateKey(date);
+}
+
+export function timestampLocalDateKey(value) {
+    const date = parseLocalTimestamp(value);
+    return date ? localDateKey(date) : "";
+}
+
 export function dueDatePart(value) { return (value || "").trim().slice(0, 10); }
 export function isToday(card) { return dueDatePart(card.due_date) === localDateKey(); }
 export function isTomorrow(card) { const t=new Date(); t.setDate(t.getDate()+1); return dueDatePart(card.due_date) === localDateKey(t); }

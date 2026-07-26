@@ -31,7 +31,7 @@ BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 ATTACHMENTS_DIR = os.path.join(BASE_DIR, "attachments")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("KANBAN_PORT", "8000"))
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 EXPORT_VERSION = 2
 MAX_JSON_BODY = 1024 * 1024
 MAX_IMPORT_BODY = 10 * 1024 * 1024
@@ -564,6 +564,17 @@ def delete_attachment(conn, attachment_id, expected_version=None):
         raise _file_in_use_error(error)
 
 
+def validate_planned_date(value):
+    value = require_string(value, "planned_date", 0, 10)
+    if not value:
+        return ""
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        fail("计划日期格式必须是 YYYY-MM-DD", field="planned_date")
+    return value
+
+
 def normalize_card_fields(data):
     require_object(data)
     return {
@@ -571,6 +582,7 @@ def normalize_card_fields(data):
         "description": sanitize_description(data.get("description", "")),
         "labels": require_string(data.get("labels", ""), "labels", 0, 2000),
         "due_date": validate_due_date(data.get("due_date", "")),
+        "planned_date": validate_planned_date(data.get("planned_date", "")),
         "priority": validate_priority(data.get("priority", "medium")),
     }
 
@@ -753,6 +765,7 @@ def init_db():
                 conn.execute("""CREATE TABLE cards (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,column_id INTEGER NOT NULL,title TEXT NOT NULL,
                     description TEXT DEFAULT '',labels TEXT DEFAULT '',due_date TEXT DEFAULT '',
+                    planned_date TEXT NOT NULL DEFAULT '',planned_position INTEGER,
                     priority TEXT NOT NULL DEFAULT 'medium',position INTEGER NOT NULL DEFAULT 0,
                     archived INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
                     completed_at TEXT,archived_at TEXT,archive_reason TEXT,is_draft INTEGER NOT NULL DEFAULT 0,
@@ -771,9 +784,10 @@ def init_db():
                 conn.execute("CREATE INDEX idx_cards_archived_updated ON cards(is_draft,archived,updated_at,id)")
                 conn.execute("CREATE INDEX idx_cards_auto_archive ON cards(is_draft,archived,column_id,completed_at)")
                 conn.execute("CREATE INDEX idx_cards_draft_updated ON cards(is_draft,updated_at,id)")
+                conn.execute("CREATE INDEX idx_cards_planned_date_position ON cards(planned_date,planned_position,id)")
                 conn.execute("INSERT INTO board_state VALUES (1,1,?)", (now_iso(),))
                 conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
-                conn.execute("PRAGMA user_version = 5")
+                conn.execute("PRAGMA user_version = 6")
         else:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -836,14 +850,23 @@ def init_db():
                             conn.execute("UPDATE cards SET description=? WHERE id=?", (normalized, row["id"]))
                     conn.execute("PRAGMA user_version = 5")
                 version = 5
+            if version < 6:
+                with transaction(conn):
+                    if not _column_exists(conn, "cards", "planned_date"):
+                        conn.execute("ALTER TABLE cards ADD COLUMN planned_date TEXT NOT NULL DEFAULT ''")
+                    if not _column_exists(conn, "cards", "planned_position"):
+                        conn.execute("ALTER TABLE cards ADD COLUMN planned_position INTEGER")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_planned_date_position ON cards(planned_date,planned_position,id)")
+                    conn.execute("PRAGMA user_version = 6")
+                version = 6
             with transaction(conn):
-                if not _column_exists(conn, "cards", "is_draft"):
                     conn.execute("ALTER TABLE cards ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_columns_active_position ON columns(deleted_at,position,id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_active_position ON cards(is_draft,archived,column_id,position,id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_archived_updated ON cards(is_draft,archived,updated_at,id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_auto_archive ON cards(is_draft,archived,column_id,completed_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_draft_updated ON cards(is_draft,updated_at,id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_planned_date_position ON cards(planned_date,planned_position,id)")
         if conn.execute("SELECT COUNT(*) FROM columns WHERE deleted_at IS NULL").fetchone()[0] == 0:
             with transaction(conn):
                 conn.executemany("INSERT INTO columns (name,position) VALUES (?,?)", [("待办", 0), ("进行中", 1), ("已完成", 2)])
@@ -894,7 +917,7 @@ def row_to_column(row):
 
 
 def row_to_card(row):
-    result = {key: row[key] for key in ("id", "column_id", "title", "description", "labels", "due_date", "priority", "position", "archived", "created_at", "updated_at", "completed_at", "archived_at", "archive_reason", "version")}
+    result = {key: row[key] for key in ("id", "column_id", "title", "description", "labels", "due_date", "planned_date", "planned_position", "priority", "position", "archived", "created_at", "updated_at", "completed_at", "archived_at", "archive_reason", "version")}
     if "attachment_count" in row.keys():
         result["attachment_count"] = row["attachment_count"]
     if "column_name" in row.keys():
@@ -1018,6 +1041,45 @@ def _rewrite_positions(conn, column_id, ids):
         conn.execute("UPDATE cards SET position=? WHERE id=?", (index, card_id))
 
 
+def _planned_card_ids(conn, planned_date, exclude=None):
+    return [r["id"] for r in conn.execute("""SELECT id FROM cards WHERE planned_date=? AND archived=0 AND is_draft=0
+                                             ORDER BY planned_position,id""", (planned_date,)) if r["id"] != exclude]
+
+
+def _rewrite_planned_positions(conn, planned_date, ids=None):
+    if not planned_date:
+        return
+    ids = _planned_card_ids(conn, planned_date) if ids is None else ids
+    for index, card_id in enumerate(ids):
+        conn.execute("UPDATE cards SET planned_position=? WHERE id=?", (index, card_id))
+
+
+def _set_card_plan(conn, cid, old_date, new_date, requested_position=None):
+    if old_date:
+        old_ids = _planned_card_ids(conn, old_date, cid)
+        _rewrite_planned_positions(conn, old_date, old_ids)
+    if not new_date:
+        conn.execute("UPDATE cards SET planned_date='',planned_position=NULL WHERE id=?", (cid,))
+        return
+    new_ids = _planned_card_ids(conn, new_date, cid)
+    if requested_position is None:
+        if old_date == new_date:
+            current_position = conn.execute(
+                "SELECT planned_position FROM cards WHERE id=?", (cid,)
+            ).fetchone()[0]
+            position = min(
+                current_position if current_position is not None else len(new_ids),
+                len(new_ids),
+            )
+        else:
+            position = len(new_ids)
+    else:
+        position = min(requested_position, len(new_ids))
+    new_ids.insert(position, cid)
+    conn.execute("UPDATE cards SET planned_date=? WHERE id=?", (new_date, cid))
+    _rewrite_planned_positions(conn, new_date, new_ids)
+
+
 def delete_column(conn, cid, data=None):
     data = require_object(data or {})
     with transaction(conn):
@@ -1027,7 +1089,14 @@ def delete_column(conn, cid, data=None):
             raise ApiError("不能删除最后一个列", 409, "LAST_ACTIVE_COLUMN")
         ts = now_iso()
         count = conn.execute("SELECT COUNT(*) FROM cards WHERE column_id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()[0]
+        planned_dates = [r["planned_date"] for r in conn.execute(
+            "SELECT DISTINCT planned_date FROM cards "
+            "WHERE column_id=? AND archived=0 AND is_draft=0 AND planned_date!=''",
+            (cid,),
+        )]
         conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='column_deleted',updated_at=?,version=version+1 WHERE column_id=? AND archived=0 AND is_draft=0", (ts, ts, cid))
+        for planned_date in planned_dates:
+            _rewrite_planned_positions(conn, planned_date)
         conn.execute("UPDATE columns SET deleted_at=?,version=version+1 WHERE id=?", (ts, cid))
         for index, col in enumerate(conn.execute("SELECT id FROM columns WHERE deleted_at IS NULL ORDER BY position,id")):
             conn.execute("UPDATE columns SET position=? WHERE id=?", (index, col["id"]))
@@ -1077,8 +1146,10 @@ def finalize_card_draft(conn, cid, data):
         column = active_column(conn, column_id)
         position, ts = len(_active_card_ids(conn, column_id)), now_iso()
         completed_at = ts if is_completed_column(column) else None
-        conn.execute("""UPDATE cards SET column_id=?,title=?,description=?,labels=?,due_date=?,priority=?,position=?,completed_at=?,updated_at=?,is_draft=0,version=version+1 WHERE id=?""",
-                     (column_id, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], position, completed_at, ts, cid))
+        conn.execute("""UPDATE cards SET column_id=?,title=?,description=?,labels=?,due_date=?,planned_date=?,priority=?,position=?,completed_at=?,updated_at=?,is_draft=0,version=version+1 WHERE id=?""",
+                     (column_id, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["planned_date"], fields["priority"], position, completed_at, ts, cid))
+        if fields["planned_date"]:
+            _set_card_plan(conn, cid, "", fields["planned_date"])
         revision = bump_revision(conn)
     return {"card": get_card(conn, cid), "revision": revision}
 
@@ -1110,8 +1181,10 @@ def create_card(conn, data):
         check_revision(conn, data.get("expected_board_revision"), required=True); column = active_column(conn, column_id)
         position, ts = len(_active_card_ids(conn, column_id)), now_iso()
         completed_at = ts if is_completed_column(column) else None
-        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at)
-                            VALUES (?,?,?,?,?,?,?,0,?,?,?)""", (column_id, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], position, ts, ts, completed_at))
+        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,planned_date,priority,position,archived,created_at,updated_at,completed_at)
+                            VALUES (?,?,?,?,?,?,?, ?,0,?,?,?)""", (column_id, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["planned_date"], fields["priority"], position, ts, ts, completed_at))
+        if fields["planned_date"]:
+            _set_card_plan(conn, cur.lastrowid, "", fields["planned_date"])
         revision = bump_revision(conn)
     return {"card": get_card(conn, cur.lastrowid), "revision": revision}
 
@@ -1146,8 +1219,27 @@ def update_card(conn, cid, data):
             _rewrite_positions(conn, target_column_id, target_ids)
         completed_at = row["completed_at"] if source_column_id == target_column_id else (now_iso() if is_completed_column(target_column) else None)
         ts = now_iso()
-        conn.execute("""UPDATE cards SET column_id=?,position=?,title=?,description=?,labels=?,due_date=?,priority=?,completed_at=?,updated_at=?,version=version+1 WHERE id=?""",
-                     (target_column_id, position, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], completed_at, ts, cid))
+        conn.execute("""UPDATE cards SET column_id=?,position=?,title=?,description=?,labels=?,due_date=?,planned_date=?,priority=?,completed_at=?,updated_at=?,version=version+1 WHERE id=?""",
+                     (target_column_id, position, fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["planned_date"], fields["priority"], completed_at, ts, cid))
+        _set_card_plan(conn, cid, row["planned_date"], fields["planned_date"])
+        revision = bump_revision(conn)
+    return {"card": get_card(conn, cid), "revision": revision}
+
+
+def plan_card(conn, cid, data):
+    data = require_object(data)
+    planned_date = validate_planned_date(data.get("planned_date"))
+    position = data.get("position")
+    if position is not None:
+        position = require_int(position, "position", 0)
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
+        if row is None:
+            raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
+        check_version(row, data.get("expected_version"), required=True)
+        check_revision(conn, data.get("expected_board_revision"), required=True)
+        _set_card_plan(conn, cid, row["planned_date"], planned_date, position)
+        conn.execute("UPDATE cards SET updated_at=?,version=version+1 WHERE id=?", (now_iso(), cid))
         revision = bump_revision(conn)
     return {"card": get_card(conn, cid), "revision": revision}
 
@@ -1181,7 +1273,9 @@ def archive_card(conn, cid, data=None):
         check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
         ts = now_iso()
         conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='manual',updated_at=?,version=version+1 WHERE id=?", (ts, ts, cid))
-        _rewrite_positions(conn, row["column_id"], _active_card_ids(conn, row["column_id"])); revision = bump_revision(conn)
+        _rewrite_positions(conn, row["column_id"], _active_card_ids(conn, row["column_id"]))
+        _rewrite_planned_positions(conn, row["planned_date"])
+        revision = bump_revision(conn)
     return {"ok": True, "column_id": row["column_id"], "position": row["position"], "version": row["version"] + 1, "revision": revision}
 
 
@@ -1206,6 +1300,7 @@ def permanently_delete_card(conn, cid, data=None):
                 conn.execute("DELETE FROM cards WHERE id=? AND is_draft=0", (cid,))
                 if not row["archived"]:
                     _rewrite_positions(conn, row["column_id"], _active_card_ids(conn, row["column_id"]))
+                    _rewrite_planned_positions(conn, row["planned_date"])
                 revision = bump_revision(conn)
                 conn.commit()
                 committed = True
@@ -1276,8 +1371,8 @@ def copy_card(conn, cid, data=None):
         ts = now_iso()
         column = active_column(conn, row["column_id"])
         completed_at = ts if is_completed_column(column) else None
-        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at)
-                            VALUES (?,?,?,?,?,?,?,0,?,?,?)""", (row["column_id"], row["title"] + "（副本）", row["description"], row["labels"], row["due_date"], row["priority"], position, ts, ts, completed_at))
+        cur = conn.execute("""INSERT INTO cards (column_id,title,description,labels,due_date,planned_date,planned_position,priority,position,archived,created_at,updated_at,completed_at)
+                            VALUES (?,?,?,?,?,'',NULL,?,?,0,?,?,?)""", (row["column_id"], row["title"] + "（副本）", row["description"], row["labels"], row["due_date"], row["priority"], position, ts, ts, completed_at))
         ids.insert(position, cur.lastrowid)
         _rewrite_positions(conn, row["column_id"], ids)
         revision = bump_revision(conn)
@@ -1409,7 +1504,7 @@ def normalize_import(data):
             active_name_keys.add(key)
         normalized_columns.append(column)
     if not any(not c["deleted_at"] for c in normalized_columns): fail("导入文件至少需要一个活跃列")
-    normalized_cards, card_ids, per_column = [], set(), {}
+    normalized_cards, card_ids, per_column, per_planned_date = [], set(), {}, {}
     for item in cards:
         item = require_object(item); card_id = require_int(item.get("id"), "cards.id", 1); column_id = require_int(item.get("column_id"), "column_id", 1)
         if card_id in card_ids: fail("卡片 id 重复")
@@ -1422,13 +1517,24 @@ def normalize_import(data):
                 "updated_at": require_string(item.get("updated_at", now_iso()), "updated_at", 1, 30),
                 "completed_at": item.get("completed_at"), "archived_at": item.get("archived_at"),
                 "archive_reason": item.get("archive_reason"),
-                "version": version if isinstance(version, int) and version > 0 else 1, "source_position": item.get("position", 0)}
+                "version": version if isinstance(version, int) and version > 0 else 1, "source_position": item.get("position", 0),
+                "source_planned_position": item.get("planned_position", 0)}
         normalized_cards.append(card)
-        if not card["archived"]: per_column.setdefault(column_id, []).append(card)
+        if not card["archived"]:
+            per_column.setdefault(column_id, []).append(card)
+            if card["planned_date"]:
+                per_planned_date.setdefault(card["planned_date"], []).append(card)
     for values in per_column.values():
         values.sort(key=lambda c: (c["source_position"] if isinstance(c["source_position"], int) else 0, c["id"]))
         for index, card in enumerate(values): card["position"] = index
-    for card in normalized_cards: card.setdefault("position", 0); card.pop("source_position", None)
+    for values in per_planned_date.values():
+        values.sort(key=lambda c: (c["source_planned_position"] if isinstance(c["source_planned_position"], int) else 0, c["id"]))
+        for index, card in enumerate(values): card["planned_position"] = index
+    for card in normalized_cards:
+        card.setdefault("position", 0)
+        card.setdefault("planned_position", None)
+        card.pop("source_position", None)
+        card.pop("source_planned_position", None)
     return {"columns": normalized_columns, "cards": normalized_cards}
 
 
@@ -1453,8 +1559,8 @@ def import_replace(conn, request):
                 for col in normalized["columns"]:
                     conn.execute("INSERT INTO columns (id,name,position,deleted_at,version) VALUES (?,?,?,?,?)", (col["id"], col["name"], col["position"], col["deleted_at"], col["version"]))
                 for card in normalized["cards"]:
-                    conn.execute("""INSERT INTO cards (id,column_id,title,description,labels,due_date,priority,position,archived,created_at,updated_at,completed_at,archived_at,archive_reason,is_draft,version)
-                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""", (card["id"], card["column_id"], card["title"], card["description"], card["labels"], card["due_date"], card["priority"], card["position"], card["archived"], card["created_at"], card["updated_at"], card["completed_at"], card["archived_at"], card["archive_reason"], card["version"]))
+                    conn.execute("""INSERT INTO cards (id,column_id,title,description,labels,due_date,planned_date,planned_position,priority,position,archived,created_at,updated_at,completed_at,archived_at,archive_reason,is_draft,version)
+                                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""", (card["id"], card["column_id"], card["title"], card["description"], card["labels"], card["due_date"], card["planned_date"], card["planned_position"], card["priority"], card["position"], card["archived"], card["created_at"], card["updated_at"], card["completed_at"], card["archived_at"], card["archive_reason"], card["version"]))
                 revision = bump_revision(conn)
                 if conn.execute("PRAGMA foreign_key_check").fetchone() is not None: raise ApiError("导入数据外键检查失败", 422, "INVALID_IMPORT_REFERENCE")
         except Exception:
@@ -1975,7 +2081,7 @@ class Handler(BaseHTTPRequestHandler):
                 if method == "DELETE": return self._send_json(archive_card(conn, cid, self._read_json_body()))
             match = re.fullmatch(r"/api/cards/(\d+)/permanent", path)
             if match and method == "DELETE": return self._send_json(permanently_delete_card(conn, int(match.group(1)), self._read_json_body()))
-            for suffix, action, verb in (("move", move_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST"), ("finalize", finalize_card_draft, "PUT")):
+            for suffix, action, verb in (("move", move_card, "PUT"), ("plan", plan_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST"), ("finalize", finalize_card_draft, "PUT")):
                 match = re.fullmatch(r"/api/cards/(\d+)/%s" % suffix, path)
                 if match and method == verb: return self._send_json(action(conn, int(match.group(1)), self._read_json_body()))
             match = re.fullmatch(r"/api/cards/(\d+)/draft", path)
@@ -2043,7 +2149,7 @@ class Handler(BaseHTTPRequestHandler):
             return "DELETE, OPTIONS"
         if re.fullmatch(r"/api/cards/\d+/(?:restore|copy)", path):
             return "POST, OPTIONS"
-        if re.fullmatch(r"/api/cards/\d+/(?:move|finalize)", path):
+        if re.fullmatch(r"/api/cards/\d+/(?:move|plan|finalize)", path):
             return "PUT, OPTIONS"
         if re.fullmatch(r"/api/cards/\d+/draft", path):
             return "DELETE, OPTIONS"

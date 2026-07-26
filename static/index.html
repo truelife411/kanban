@@ -19,6 +19,7 @@
         </div>
         <div class="topbar-center view-tabs" role="tablist" aria-label="主要视图">
             <button id="btn-board" data-view="board" class="nav-btn active" role="tab" aria-selected="true" aria-controls="view-board" tabindex="0">看板</button>
+            <button id="btn-today" data-view="today" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-today" tabindex="-1">今日</button>
             <button id="btn-history" data-view="history" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">历史归档</button>
         </div>
         <div class="topbar-right">
@@ -39,6 +40,29 @@
         <div id="filter-reorder-hint" class="filter-reorder-hint" role="status" hidden>筛选状态下暂不支持卡片和列手动排序</div>
         <div id="board" class="board" aria-label="看板">
             <!-- 列由 JS 渲染 -->
+        </div>
+    </main>
+
+    <!-- ============ 今日中心视图 ============ -->
+    <main id="view-today" class="today-view" role="tabpanel" aria-labelledby="btn-today" tabindex="0" hidden>
+        <div class="today-shell">
+            <header class="today-heading">
+                <div>
+                    <p id="today-date" class="today-date"></p>
+                    <h2>今日中心</h2>
+                </div>
+                <div class="today-summary" aria-label="今日任务摘要">
+                    <span><strong id="today-pending-count">0</strong> 待完成</span>
+                    <span><strong id="today-completed-count">0</strong> 已完成</span>
+                    <span><strong id="today-overdue-count">0</strong> 逾期</span>
+                </div>
+            </header>
+            <form id="today-quick-add" class="today-quick-add">
+                <label class="sr-only" for="today-quick-title">快速添加今日任务</label>
+                <input id="today-quick-title" type="text" autocomplete="off" placeholder="快速添加今日任务…">
+                <button id="today-quick-submit" class="primary" type="submit">添加到今日</button>
+            </form>
+            <div id="today-sections" class="today-sections" aria-live="polite"></div>
         </div>
     </main>
 
@@ -187,6 +211,14 @@
                         <label><input type="radio" name="theme" value="deep-sea-night" data-theme-value="deep-sea-night"><span class="theme-option-content"><span class="theme-swatch theme-swatch-night"></span><span>深海夜</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
                         <label><input type="radio" name="theme" value="aurora" data-theme-value="aurora"><span class="theme-option-content"><span class="theme-swatch theme-swatch-aurora"></span><span>极光</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
                         <label><input type="radio" name="theme" value="aurora-night" data-theme-value="aurora-night"><span class="theme-option-content"><span class="theme-swatch theme-swatch-aurora-night"></span><span>极光夜</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="aurora-glass" data-theme-value="aurora-glass"><span class="theme-option-content"><span class="theme-swatch theme-swatch-aurora-glass"></span><span>极光玻璃</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="pixel-arcade" data-theme-value="pixel-arcade"><span class="theme-option-content"><span class="theme-swatch theme-swatch-pixel-arcade"></span><span>像素街机</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="mushanzi" data-theme-value="mushanzi"><span class="theme-option-content"><span class="theme-swatch theme-swatch-mushanzi"></span><span>暮山紫</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="matcha" data-theme-value="matcha"><span class="theme-option-content"><span class="theme-swatch theme-swatch-matcha"></span><span>抹茶</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="forest-night" data-theme-value="forest-night"><span class="theme-option-content"><span class="theme-swatch theme-swatch-forest-night"></span><span>森林夜</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="morandi" data-theme-value="morandi"><span class="theme-option-content"><span class="theme-swatch theme-swatch-morandi"></span><span>莫兰迪</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="mist-pine" data-theme-value="mist-pine"><span class="theme-option-content"><span class="theme-swatch theme-swatch-mist-pine"></span><span>雾松</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
+                        <label><input type="radio" name="theme" value="mist-pine-night" data-theme-value="mist-pine-night"><span class="theme-option-content"><span class="theme-swatch theme-swatch-mist-pine-night"></span><span>雾松夜</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
                     </div>
                 </fieldset>
             </section>

@@ -10,6 +10,8 @@ export const state = {
     sortByColumn: {},
     cardDescriptionDisplay: "two-lines",
     quickCreate: { columnId: null, title: "", submitting: false },
+    todayQuickCreate: { title: "", submitting: false },
+    todayLaterExpanded: false,
     currentCardId: null,
     currentCardCol: null,
     currentCardDraft: false,

@@ -73,19 +73,52 @@ class AccessibilityContractTests(unittest.TestCase):
 
     def test_view_switcher_uses_tab_semantics(self):
         self.assertIn('role="tablist"', self.html)
-        self.assertEqual(self.html.count('role="tab"'), 2)
-        self.assertEqual(self.html.count('role="tabpanel"'), 2)
+        self.assertEqual(self.html.count('role="tab"'), 3)
+        self.assertEqual(self.html.count('role="tabpanel"'), 3)
         self.assertIn('aria-controls="view-board"', self.html)
+        self.assertIn('aria-controls="view-today"', self.html)
         self.assertIn('aria-controls="view-history"', self.html)
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
         self.assertIn("setupViewTabs", app_js)
         self.assertIn('event.key==="ArrowRight"', app_js)
         self.assertIn('event.key==="ArrowLeft"', app_js)
+        self.assertIn('event.key==="Home"', app_js)
+        self.assertIn('event.key==="End"', app_js)
+
+    def test_today_center_markup_and_behavior_contract(self):
+        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        for element_id in (
+            "btn-today", "view-today", "today-date", "today-pending-count",
+            "today-completed-count", "today-overdue-count", "today-quick-add",
+            "today-quick-title", "today-quick-submit", "today-sections",
+        ):
+            self.assertIn(f'id="{element_id}"', self.html)
+        self.assertIn('aria-labelledby="btn-today"', self.html)
+        self.assertIn('aria-label="今日任务摘要"', self.html)
+        self.assertIn('aria-live="polite"', self.html)
+        for function_name in (
+            "todayGroups", "renderToday", "renderTodaySection", "renderTodayCard",
+            "completeTodayCard", "planTodayCard", "postponeTodayCard",
+            "setupTodayPlanDrop", "quickAddToday",
+        ):
+            self.assertIn(function_name, app_js)
+        self.assertIn('`/api/cards/${card.id}/plan`', app_js)
+        self.assertIn('planned_date:localDateKey()', app_js)
+        for label in ("逾期", "今天", "稍后", "今天已完成"):
+            self.assertIn(f'"{label}"', app_js)
+
+    def test_today_center_styles_exist(self):
+        for selector in (
+            ".today-view", ".today-shell", ".today-summary", ".today-quick-add",
+            ".today-section", ".today-card", ".today-complete-button",
+            ".today-card-actions", ".today-empty",
+        ):
+            self.assertIn(selector, self.css)
 
     def test_theme_settings_and_themes_exist(self):
         theme_init_js = (ROOT / "static" / "theme-init.js").read_text(encoding="utf-8")
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
-        themes = ("mint", "sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "terracotta", "tianqing", "dailan", "qunqing", "qiuxiang", "oat", "apricot", "pearl", "sandstone", "liquid-glass", "deep-sea-night", "aurora", "aurora-night")
+        themes = ("mint", "sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "terracotta", "tianqing", "dailan", "qunqing", "qiuxiang", "oat", "apricot", "pearl", "sandstone", "liquid-glass", "deep-sea-night", "aurora", "aurora-night", "aurora-glass", "pixel-arcade", "mushanzi", "matcha", "forest-night", "morandi", "mist-pine", "mist-pine-night")
         legacy_themes = (
             "cloud-blue", "navy-blue", "aurora-blue", "douban-classic",
             "douban-modern", "office", "dark-tech",
@@ -95,7 +128,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn('id="theme-button"', self.html)
         self.assertNotIn('id="theme-menu"', self.html)
         self.assertIn('data-theme="mint"', self.html)
-        for theme, name in zip(themes, ("薄荷绿", "海盐蓝", "豆瓣绿", "黑白", "陶土", "赭石", "天青", "黛蓝", "群青", "秋香", "燕麦", "奶杏", "珍珠", "砂陶", "玻璃", "深海夜", "极光", "极光夜")):
+        for theme, name in zip(themes, ("薄荷绿", "海盐蓝", "豆瓣绿", "黑白", "陶土", "赭石", "天青", "黛蓝", "群青", "秋香", "燕麦", "奶杏", "珍珠", "砂陶", "玻璃", "深海夜", "极光", "极光夜", "极光玻璃", "像素街机", "暮山紫", "抹茶", "森林夜", "莫兰迪", "雾松", "雾松夜")):
             self.assertIn(f'value="{theme}"', self.html)
             self.assertIn(f'data-theme-value="{theme}"', self.html)
             self.assertIn(name, self.html)
