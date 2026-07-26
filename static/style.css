@@ -89,8 +89,9 @@ input, textarea, select { font-family: inherit; font-size: 14px; }/* ===========
 .add-btn { font-weight: 600; }/* ============ 看板视图 ============ */
 
 .board-view {
-    height: calc(100vh - 48px);
     display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
     flex-direction: column;
     overflow-x: auto;
     overflow-y: hidden;
@@ -346,7 +347,8 @@ input, textarea, select { font-family: inherit; font-size: 14px; }/* ===========
     background: var(--board-bg);
     display: flex;
     flex-direction: column;
-    height: calc(100dvh - 56px);
+    flex: 1 1 auto;
+    min-height: 0;
     overflow: hidden;
 }
 .search-panel {
@@ -752,14 +754,14 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
     .topbar-left .logo { font-size: 15px; }
     .topbar-right { width: 100%; overflow-x: auto; padding-bottom: 2px; }
     .icon-btn, .nav-btn { min-height: 40px; }
-    .board-view { height: calc(100dvh - 96px); padding: 8px; }
+    .board-view { height: calc(100vh - 96px); padding: 8px; }
     .column { width: min(86vw, 320px); min-width: min(86vw, 320px); scroll-snap-align: start; }
     .board { scroll-snap-type: x proximity; }
     .modal-overlay { padding: 0; align-items: stretch; }
-    .modal, .modal.small { width: 100%; max-width: 100%; max-height: 100dvh; border-radius: 0; }
+    .modal, .modal.small { width: 100%; max-width: 100%; max-height: 100vh; border-radius: 0; }
     .editor-toolbar { overflow-x: auto; overflow-y: visible; }
     .editor-toolbar button { width: 40px; min-width: 40px; height: 40px; }
-    .rich-color-menu { position: fixed; top: auto; right: 10px; bottom: 12px; left: 10px; width: auto; max-height: 60dvh; overflow-y: auto; }
+    .rich-color-menu { position: fixed; top: auto; right: 10px; bottom: 12px; left: 10px; width: auto; max-height: 60vh; overflow-y: auto; }
     .due-inputs { flex-direction: column; }
     .date-input-shell { flex-basis:auto; width:100%; }
     .date-shell-time { min-width:0; }
@@ -996,12 +998,12 @@ button:focus-visible, [role="button"]:focus-visible, input:focus-visible, select
     --rt-bg-red:#44262c; --rt-bg-red-text:#ffd2d5; --rt-bg-yellow:#453b23; --rt-bg-yellow-text:#f6dda0; --rt-bg-green:#203a2d; --rt-bg-green-text:#bce4cc;
     --rt-bg-blue:#203747; --rt-bg-blue-text:#c1e1f2; --rt-bg-purple:#382c43; --rt-bg-purple-text:#e2cbea;
 }
-html,body { min-height:100%; height:auto; color:var(--text); background:var(--board-bg); }
-body { min-height:100vh; min-height:100dvh; display:flex; flex-direction:column; }
+html,body { height:100%; color:var(--text); background:var(--board-bg); }
+body { display:flex; flex-direction:column; overflow:hidden; }
 .topbar { flex:0 0 auto; height:56px; color:var(--text); background:var(--surface-control); border-bottom:1px solid var(--border); box-shadow:var(--shadow); backdrop-filter:none; }
 .board-view, .settings-view { flex:1 1 auto; min-height:0; height:auto; background:transparent; }
-.history-view { flex:1 1 auto; min-height:0; background:transparent; height: calc(100dvh - 56px); overflow:hidden; }
-.board-view { overflow-x:auto; overflow-y:hidden; height: calc(100dvh - 56px); }
+.history-view { flex:1 1 auto; min-height:0; background:transparent; overflow:hidden; }
+.board-view { overflow-x:auto; overflow-y:hidden; }
 .topbar-left .logo { display:flex; align-items:center; gap:10px; }
 .logo-mark { width:30px; height:30px; flex:0 0 30px; display:inline-flex; align-items:center; justify-content:center; color:var(--text-on-accent); border:0; border-radius:8px; background:linear-gradient(145deg,var(--primary),var(--primary-hover)); box-shadow:0 5px 14px color-mix(in srgb,var(--primary) 24%,transparent); }
 .logo-mark svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
@@ -1531,7 +1533,7 @@ button:focus-visible,[role="button"]:focus-visible,input:focus-visible,select:fo
 .settings-view {
     min-height: 0;
     flex: 1 1 auto;
-    height: calc(100dvh - 56px);
+    height: calc(100vh - 56px);
     padding: 28px max(18px, calc((100vw - 980px) / 2)) 48px;
     background: var(--board-bg);
     overflow-y: auto;
