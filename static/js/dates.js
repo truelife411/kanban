@@ -4,6 +4,7 @@ export function localDateKey(date = new Date()) {
 
 export function dueDatePart(value) { return (value || "").trim().slice(0, 10); }
 export function isToday(card) { return dueDatePart(card.due_date) === localDateKey(); }
+export function isTomorrow(card) { const t=new Date(); t.setDate(t.getDate()+1); return dueDatePart(card.due_date) === localDateKey(t); }
 
 export function isOverdue(card, referenceDate) {
     const now = referenceDate instanceof Date ? referenceDate : new Date();

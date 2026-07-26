@@ -85,7 +85,7 @@ class AccessibilityContractTests(unittest.TestCase):
     def test_theme_settings_and_themes_exist(self):
         theme_init_js = (ROOT / "static" / "theme-init.js").read_text(encoding="utf-8")
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
-        themes = ("mint", "sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "terracotta", "tianqing", "dailan", "qunqing", "qiuxiang", "liquid-glass", "deep-sea-night", "aurora", "aurora-night")
+        themes = ("mint", "sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "terracotta", "tianqing", "dailan", "qunqing", "qiuxiang", "oat", "apricot", "pearl", "sandstone", "liquid-glass", "deep-sea-night", "aurora", "aurora-night")
         legacy_themes = (
             "cloud-blue", "navy-blue", "aurora-blue", "douban-classic",
             "douban-modern", "office", "dark-tech",
@@ -95,7 +95,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn('id="theme-button"', self.html)
         self.assertNotIn('id="theme-menu"', self.html)
         self.assertIn('data-theme="mint"', self.html)
-        for theme, name in zip(themes, ("薄荷绿", "海盐蓝", "豆瓣绿", "黑白", "陶土", "赭石", "天青", "黛蓝", "群青", "秋香", "玻璃", "深海夜", "极光", "极光夜")):
+        for theme, name in zip(themes, ("薄荷绿", "海盐蓝", "豆瓣绿", "黑白", "陶土", "赭石", "天青", "黛蓝", "群青", "秋香", "燕麦", "奶杏", "珍珠", "砂陶", "玻璃", "深海夜", "极光", "极光夜")):
             self.assertIn(f'value="{theme}"', self.html)
             self.assertIn(f'data-theme-value="{theme}"', self.html)
             self.assertIn(name, self.html)
