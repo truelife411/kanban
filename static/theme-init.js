@@ -1,6 +1,6 @@
 (function () {
-    var defaultTheme = "sea-salt-blue";
-    var themes = ["sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "liquid-glass", "deep-sea-night"];
+    var defaultTheme = "qianli";
+    var themes = ["qianli", "sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "liquid-glass", "deep-sea-night", "aurora", "aurora-night"];
     var legacyThemes = {
         "cloud-blue": "sea-salt-blue",
         "navy-blue": "sea-salt-blue",
