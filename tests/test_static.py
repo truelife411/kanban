@@ -97,20 +97,44 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('aria-label="今日任务摘要"', self.html)
         self.assertIn('aria-live="polite"', self.html)
         for function_name in (
-            "todayGroups", "renderToday", "renderTodaySection", "renderTodayCard",
-            "completeTodayCard", "planTodayCard", "postponeTodayCard",
-            "setupTodayPlanDrop", "quickAddToday",
+            "todayGroups", "todayReasons", "renderToday", "renderTodaySection", "renderTodayCard",
+            "completeTodayCard", "reopenTodayCard", "incompleteColumn", "planTodayCard", "postponeTodayCard",
+            "updateTodayCardDue", "openTodayDueDialogFor", "renderTodayDueControl", "setupTodayPlanDrop", "quickAddToday",
         ):
             self.assertIn(function_name, app_js)
         self.assertIn('`/api/cards/${card.id}/plan`', app_js)
+        self.assertIn('due_date:localDateKey()', app_js)
         self.assertIn('planned_date:localDateKey()', app_js)
-        for label in ("逾期", "今天", "稍后", "今天已完成"):
+        self.assertIn('normalizedColumnName(column.name)==="待办"', app_js)
+        self.assertIn('!isTodo(card)&&dueDatePart(card.due_date)<today', app_js)
+        self.assertIn('!currentIds.has(card.id)&&dueDatePart(card.due_date)===tomorrow', app_js)
+        self.assertIn('reasons.push("待办任务")', app_js)
+        self.assertNotIn('reasons.push("已加入今日")', app_js)
+        self.assertIn('reasons.push("今天截止")', app_js)
+        self.assertNotIn("toggleTodayPlan", app_js)
+        self.assertNotIn("today-plan-action", app_js)
+        self.assertIn('group==="done"?reopenTodayCard(card):completeTodayCard(card)', app_js)
+        self.assertIn('normalizedColumnName(column.name)==="待办"', app_js)
+        self.assertIn('button.textContent="修改截止日期"', app_js)
+        self.assertIn('title.textContent="修改截止日期和时间"', app_js)
+        self.assertIn('dialog.className="modal small today-due-dialog"', app_js)
+        self.assertIn('buildField("date",dateId,"截止日期",due.date)', app_js)
+        self.assertIn('buildField("time",timeId,"截止时间",due.time)', app_js)
+        self.assertIn('save.textContent="保存"', app_js)
+        self.assertNotIn("openTodayDueMenu", app_js)
+        self.assertNotIn("today-due-menu", app_js)
+        self.assertIn('planned_date:card.planned_date||""', app_js)
+        self.assertNotIn("todayLaterExpanded", app_js)
+        self.assertNotIn("todayLaterExpanded", (ROOT / "static" / "js" / "state.js").read_text(encoding="utf-8"))
+        for label in ("逾期", "今天", "稍后", "今天已完成", "延期一天", "清除截止日期"):
             self.assertIn(f'"{label}"', app_js)
 
     def test_today_center_styles_exist(self):
         for selector in (
             ".today-view", ".today-shell", ".today-summary", ".today-quick-add",
             ".today-section", ".today-card", ".today-complete-button",
+            ".today-card-reasons", ".today-reason-badge", ".today-due-button",
+            ".today-due-dialog-body", ".today-due-fields", ".today-due-dialog-quick",
             ".today-card-actions", ".today-empty",
         ):
             self.assertIn(selector, self.css)
@@ -118,7 +142,7 @@ class AccessibilityContractTests(unittest.TestCase):
     def test_theme_settings_and_themes_exist(self):
         theme_init_js = (ROOT / "static" / "theme-init.js").read_text(encoding="utf-8")
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
-        themes = ("mint", "sea-salt-blue", "douban-green", "swiss-mono", "warm-paper", "terracotta", "tianqing", "dailan", "qunqing", "qiuxiang", "oat", "apricot", "pearl", "sandstone", "liquid-glass", "deep-sea-night", "aurora", "aurora-night", "aurora-glass", "pixel-arcade", "mushanzi", "matcha", "forest-night", "morandi", "mist-pine", "mist-pine-night")
+        themes = ("mint", "douban-green", "swiss-mono", "sea-salt-blue", "oat", "pearl", "liquid-glass", "deep-sea-night", "aurora", "aurora-glass", "pixel-arcade", "forest-night", "mist-pine-night")
         legacy_themes = (
             "cloud-blue", "navy-blue", "aurora-blue", "douban-classic",
             "douban-modern", "office", "dark-tech",
@@ -128,7 +152,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn('id="theme-button"', self.html)
         self.assertNotIn('id="theme-menu"', self.html)
         self.assertIn('data-theme="mint"', self.html)
-        for theme, name in zip(themes, ("薄荷绿", "海盐蓝", "豆瓣绿", "黑白", "陶土", "赭石", "天青", "黛蓝", "群青", "秋香", "燕麦", "奶杏", "珍珠", "砂陶", "玻璃", "深海夜", "极光", "极光夜", "极光玻璃", "像素街机", "暮山紫", "抹茶", "森林夜", "莫兰迪", "雾松", "雾松夜")):
+        for theme, name in zip(themes, ("薄荷绿", "豆瓣绿", "黑白", "海盐蓝", "燕麦", "珍珠", "玻璃", "深海夜", "极光", "极光玻璃", "像素街机", "森林夜", "雾凇夜")):
             self.assertIn(f'value="{theme}"', self.html)
             self.assertIn(f'data-theme-value="{theme}"', self.html)
             self.assertIn(name, self.html)
@@ -169,8 +193,6 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn(':root[data-theme="douban-green"].topbar', compact_css)
         self.assertIn(':root[data-theme="swiss-mono"]', compact_css)
         self.assertIn("font-family:", compact_css[compact_css.index(':root[data-theme="swiss-mono"]'):])
-        self.assertIn(':root[data-theme="warm-paper"]body', compact_css)
-        self.assertIn("linear-gradient", compact_css[compact_css.index(':root[data-theme="warm-paper"]body'):])
         liquid_glass_start = compact_css.index(':root[data-theme="liquid-glass"]')
         liquid_glass_end = compact_css.find(':root[data-theme="deep-sea-night"]', liquid_glass_start)
         liquid_glass_tokens = compact_css[liquid_glass_start:liquid_glass_end]
@@ -206,6 +228,12 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('title=editing?"重命名列":"新增列"', app_js)
         self.assertIn('primaryClass:"ghost",focus:"cancel",opener', app_js)
         self.assertIn("setupButtonTooltips", app_js)
+        self.assertEqual(self.html.count('class="themed-select"'), 2)
+        self.assertIn('data-select-id="card-priority"', self.html)
+        self.assertIn('data-select-id="card-column"', self.html)
+        self.assertIn("setupThemedSelects", app_js)
+        self.assertIn("syncThemedSelect(select)", app_js)
+        self.assertIn('.themed-select-menu button[aria-selected="true"]', self.css)
 
     def test_attachment_ui_contract(self):
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
@@ -295,7 +323,9 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn(".result-descp,.result-descdiv{margin:0;min-height:1.5em;}", compact_css)
         self.assertIn(".result-descul,.result-descol{padding-left:24px;margin:4px0;white-space:normal;}", compact_css)
         self.assertIn('document.getElementById("card-description").innerHTML=card.description||""', app_js)
-        self.assertIn('description:document.getElementById("card-description").innerHTML', app_js)
+        self.assertIn('description:normalizeDescriptionHtml(document.getElementById("card-description").innerHTML)', app_js)
+        self.assertIn("function normalizeDescriptionHtml", app_js)
+        self.assertIn('tag==="strike"', app_js)
 
     def test_rich_text_color_controls_are_safe_and_accessible(self):
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
@@ -428,6 +458,12 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn("clearChildren(box)", ui_js)
         self.assertIn("clearChildren(board)", app_js)
         self.assertIn("clearChildren(dueBox)", app_js)
+        self.assertIn("clearCardDragPreview", app_js)
+        self.assertIn("cardDragPreview=preview", app_js)
+        self.assertIn("void event.currentTarget.offsetWidth", app_js)
+        self.assertNotIn("requestAnimationFrame(()=>preview.remove())", app_js)
+        self.assertIn('document.addEventListener("pointerdown",closeOpenMenusFromPointer,true)', app_js)
+        self.assertNotIn('document.addEventListener("click",event=>{if(openColorMenu', app_js)
         self.assertNotIn(".replaceChildren()", app_js)
         compact_css = "".join(self.css.split())
         self.assertIn(".board-view{", compact_css)

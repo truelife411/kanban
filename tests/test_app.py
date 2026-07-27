@@ -358,10 +358,16 @@ class ValidationTests(DatabaseTestCase):
             "<p><strong>摘要</strong></p><ul><li><em>一级</em><ol><li><u>二级</u></li></ol></li></ul>",
         )
 
+    def test_description_normalizes_cross_browser_inline_tags(self):
+        self.assertEqual(
+            app.sanitize_description("<div><b>粗体</b><i>斜体</i><strike>删除</strike></div>"),
+            "<p><strong>粗体</strong><em>斜体</em><s>删除</s></p>",
+        )
+
     def test_description_sanitization_removes_xss_and_is_idempotent(self):
         source = '<div class="bad" onclick="x">安全<img src=x onerror=x><script><b>危险</b></script><i style="x">格式</i></div>'
         sanitized = app.sanitize_description(source)
-        self.assertEqual(sanitized, "<p>安全<i>格式</i></p>")
+        self.assertEqual(sanitized, "<p>安全<em>格式</em></p>")
         self.assertEqual(app.sanitize_description(sanitized), sanitized)
 
     def test_description_color_classes_are_allowlisted_and_canonical(self):

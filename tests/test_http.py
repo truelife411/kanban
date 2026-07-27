@@ -407,10 +407,12 @@ class HttpApiTests(unittest.TestCase):
     def test_create_card_with_planned_date_supports_today_quick_add(self):
         board = self.get_board()
         payload = self.card_payload(board, "快速今日")
+        payload["due_date"] = "2026-07-26"
         payload["planned_date"] = "2026-07-26"
         status, _, body = self.request("POST", "/api/cards", payload)
         self.assertEqual(status, 201)
         card = json.loads(body)["card"]
+        self.assertEqual(card["due_date"], "2026-07-26")
         self.assertEqual(card["planned_date"], "2026-07-26")
         self.assertEqual(card["planned_position"], 0)
 

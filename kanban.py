@@ -262,9 +262,10 @@ class SafeHtmlParser(HTMLParser):
             return
         if tag == "br":
             self.stack[-1][2].append(("br", (), []))
-        elif tag in self.allowed or tag == "div":
-            classes = self._span_classes(attrs) if tag == "span" else ()
-            node = (tag, classes, [])
+        elif tag in self.allowed or tag in {"div", "strike"}:
+            normalized_tag = {"b": "strong", "i": "em", "strike": "s"}.get(tag, tag)
+            classes = self._span_classes(attrs) if normalized_tag == "span" else ()
+            node = (normalized_tag, classes, [])
             self.stack[-1][2].append(node)
             self.stack.append(node)
 
@@ -279,10 +280,11 @@ class SafeHtmlParser(HTMLParser):
             if tag in self.blocked_tags:
                 self.blocked = max(0, self.blocked - 1)
             return
-        if tag == "br" or (tag not in self.allowed and tag != "div"):
+        normalized_tag = {"b": "strong", "i": "em", "strike": "s"}.get(tag, tag)
+        if normalized_tag == "br" or (normalized_tag not in self.allowed and normalized_tag != "div"):
             return
         for index in range(len(self.stack) - 1, 0, -1):
-            if self.stack[index][0] == tag:
+            if self.stack[index][0] == normalized_tag:
                 del self.stack[index:]
                 break
 
@@ -860,6 +862,7 @@ def init_db():
                     conn.execute("PRAGMA user_version = 6")
                 version = 6
             with transaction(conn):
+                if not _column_exists(conn, "cards", "is_draft"):
                     conn.execute("ALTER TABLE cards ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_columns_active_position ON columns(deleted_at,position,id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_cards_active_position ON cards(is_draft,archived,column_id,position,id)")
