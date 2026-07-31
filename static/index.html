@@ -19,7 +19,7 @@
         </div>
         <div class="topbar-center view-tabs" role="tablist" aria-label="主要视图">
             <button id="btn-board" data-view="board" class="nav-btn active" role="tab" aria-selected="true" aria-controls="view-board" tabindex="0">看板</button>
-            <button id="btn-today" data-view="today" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-today" tabindex="-1">今日</button>
+            <button id="btn-today" data-view="today" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-today" tabindex="-1"><span>今日</span><span id="today-tab-count" class="nav-count" aria-label="今日待完成数量" hidden></span></button>
             <button id="btn-history" data-view="history" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">历史归档</button>
         </div>
         <div class="topbar-right">
@@ -243,6 +243,9 @@
                     <span class="field-label" id="card-description-label">描述</span>
                     <div class="editor-toolbar" id="editor-toolbar">
                         <div class="tb-group" role="group" aria-label="列表和缩进">
+                            <button type="button" title="复选框" aria-label="插入复选框" data-action="insert-checkbox">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m8 12 3 3 5-6"/></svg>
+                            </button>
                             <button type="button" title="项目符号" aria-label="项目符号" data-cmd="insertUnorderedList">
                                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="18" r="1.25" fill="currentColor" stroke="none"/><path d="M10 6h9M10 12h9M10 18h9"/></svg>
                             </button>

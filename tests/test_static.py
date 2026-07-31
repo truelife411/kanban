@@ -106,11 +106,12 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('due_date:localDateKey()', app_js)
         self.assertIn('planned_date:localDateKey()', app_js)
         self.assertIn('normalizedColumnName(column.name)==="待办"', app_js)
-        self.assertIn('!isTodo(card)&&dueDatePart(card.due_date)<today', app_js)
+        self.assertIn('const overdue=active.filter(card=>dueDatePart(card.due_date)<today&&Boolean(dueDatePart(card.due_date)))', app_js)
+        self.assertIn('!overdueIds.has(card.id)&&(isTodo(card)||card.planned_date===today||dueDatePart(card.due_date)===today)', app_js)
         self.assertIn('!currentIds.has(card.id)&&dueDatePart(card.due_date)===tomorrow', app_js)
         self.assertIn('reasons.push("待办任务")', app_js)
         self.assertNotIn('reasons.push("已加入今日")', app_js)
-        self.assertIn('reasons.push("今天截止")', app_js)
+        self.assertIn('reasons.push("今日截止")', app_js)
         self.assertNotIn("toggleTodayPlan", app_js)
         self.assertNotIn("today-plan-action", app_js)
         self.assertIn('group==="done"?reopenTodayCard(card):completeTodayCard(card)', app_js)
@@ -126,7 +127,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('planned_date:card.planned_date||""', app_js)
         self.assertNotIn("todayLaterExpanded", app_js)
         self.assertNotIn("todayLaterExpanded", (ROOT / "static" / "js" / "state.js").read_text(encoding="utf-8"))
-        for label in ("逾期", "今天", "稍后", "今天已完成", "延期一天", "清除截止日期"):
+        for label in ("逾期", "今日", "稍后", "今日已完成", "今天", "明天", "后天", "本周五", "下周五", "月底", "清除"):
             self.assertIn(f'"{label}"', app_js)
 
     def test_today_center_styles_exist(self):
@@ -322,7 +323,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn('description.textContent=stripHtml(card.description)', app_js)
         self.assertIn(".result-descp,.result-descdiv{margin:0;min-height:1.5em;}", compact_css)
         self.assertIn(".result-descul,.result-descol{padding-left:24px;margin:4px0;white-space:normal;}", compact_css)
-        self.assertIn('document.getElementById("card-description").innerHTML=card.description||""', app_js)
+        self.assertIn('document.getElementById("card-description").innerHTML=hydrateDescriptionHtml(card.description)', app_js)
         self.assertIn('description:normalizeDescriptionHtml(document.getElementById("card-description").innerHTML)', app_js)
         self.assertIn("function normalizeDescriptionHtml", app_js)
         self.assertIn('tag==="strike"', app_js)

@@ -238,6 +238,7 @@ class SafeHtmlParser(HTMLParser):
     blocked_tags = {"script", "style", "iframe", "object", "svg"}
     text_color_classes = {"rt-fg-default", "rt-fg-red", "rt-fg-yellow", "rt-fg-green", "rt-fg-blue", "rt-fg-purple"}
     highlight_classes = {"rt-bg-red", "rt-bg-yellow", "rt-bg-green", "rt-bg-blue", "rt-bg-purple"}
+    checkbox_classes = {"rt-checkbox", "rt-checkbox-checked"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -247,6 +248,9 @@ class SafeHtmlParser(HTMLParser):
 
     def _span_classes(self, attrs):
         values = dict(attrs).get("class", "").split()
+        checkbox = next((value for value in values if value in self.checkbox_classes), None)
+        if checkbox:
+            return (checkbox,)
         foreground = next((value for value in values if value in self.text_color_classes), None)
         highlight = next((value for value in values if value in self.highlight_classes), None)
         return tuple(value for value in (foreground, highlight) if value)
@@ -311,6 +315,10 @@ class SafeHtmlParser(HTMLParser):
             tag, classes, children = node
             children = self._canonical_nodes(children)
             if tag == "span":
+                checkbox = next((value for value in classes if value in self.checkbox_classes), None)
+                if checkbox:
+                    result.append(("span", (checkbox,), ["☑" if checkbox == "rt-checkbox-checked" else "☐"]))
+                    continue
                 if not self._has_content(children):
                     continue
                 if not classes:
@@ -318,13 +326,13 @@ class SafeHtmlParser(HTMLParser):
                     continue
                 flattened = []
                 for child in children:
-                    if not isinstance(child, str) and child[0] == "span" and child[1] == classes:
+                    if not isinstance(child, str) and child[0] == "span" and child[1] == classes and not any(value in self.checkbox_classes for value in classes):
                         flattened.extend(child[2])
                     else:
                         flattened.append(child)
                 children = flattened
             current = (tag, classes, children)
-            if tag == "span" and result and not isinstance(result[-1], str) and result[-1][0] == "span" and result[-1][1] == classes:
+            if tag == "span" and result and not isinstance(result[-1], str) and result[-1][0] == "span" and result[-1][1] == classes and not any(value in self.checkbox_classes for value in classes):
                 previous = result[-1]
                 result[-1] = ("span", classes, previous[2] + children)
             else:
