@@ -1,6 +1,6 @@
 (function () {
     var defaultTheme = "mint";
-    var themes = ["mint", "douban-green", "swiss-mono", "sea-salt-blue", "oat", "pearl", "liquid-glass", "deep-sea-night", "aurora", "aurora-glass", "pixel-arcade", "forest-night", "mist-pine-night"];
+    var themes = ["mint", "douban-green", "swiss-mono", "sea-salt-blue", "oat", "pearl", "liquid-glass", "deep-sea-night", "aurora", "aurora-glass", "pixel-arcade", "forest-night", "mist-pine-night", "ink-wash"];
     var legacyThemes = {
         "cloud-blue": "sea-salt-blue",
         "navy-blue": "sea-salt-blue",
