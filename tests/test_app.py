@@ -754,12 +754,12 @@ class AttachmentTests(DatabaseTestCase):
             self.assertEqual(handle.read(), b"new-data")
         self.archive_card(card["id"])
         self.assertEqual(app.search_cards(self.conn, q="REPORT")[0]["id"], card["id"])
-        with self.assertRaises(app.ApiError):
-            app.delete_attachment(self.conn, replaced["id"], replaced["version"])
-        restored = self.restore_card(card["id"])["card"]
-        self.assertEqual(restored["attachment_count"], 1)
+        # 归档卡片现在允许管理附件(编辑描述/替换附件场景)
         app.delete_attachment(self.conn, replaced["id"], replaced["version"])
-        self.assertEqual(app.get_card(self.conn, card["id"])["attachment_count"], 0)
+        restored = self.restore_card(card["id"])["card"]
+        self.assertEqual(restored["attachment_count"], 0)
+        app.save_attachment(self.conn, restored["id"], "data.bin", "", io.BytesIO(b"x"), 1)
+        self.assertEqual(app.get_card(self.conn, card["id"])["attachment_count"], 1)
 
     def test_post_commit_attachment_cleanup_failure_keeps_new_file(self):
         card = self.create_card(app.list_columns(self.conn)[0]["id"], "清理失败")
@@ -787,6 +787,40 @@ class AttachmentTests(DatabaseTestCase):
             app.delete_attachment(self.conn, attachment["id"], attachment["version"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM attachments WHERE id=?", (attachment["id"],)).fetchone()[0], 0)
         self.assertFalse(os.path.exists(app.attachment_path(card["id"], "data.bin")))
+
+    def test_archived_card_edit_updates_fields_and_manages_attachments(self):
+        column = app.list_columns(self.conn)[0]
+        card = self.create_card(column["id"], "归档编辑")
+        app.save_attachment(self.conn, card["id"], "old.txt", "text/plain", io.BytesIO(b"old"), 3)
+        self.archive_card(card["id"])
+        archived = app.get_card(self.conn, card["id"], include_draft=True)
+        self.assertEqual(archived["archived"], 1)
+        revision = app.board_revision(self.conn)
+        payload = {
+            "column_id": column["id"], "title": "归档编辑后", "description": "<p>新描述</p>", "labels": "归档, 编辑",
+            "due_date": "2026-12-31", "planned_date": archived["planned_date"], "priority": "high",
+            "expected_version": archived["version"], "expected_board_revision": revision,
+        }
+        result = app.update_card(self.conn, card["id"], payload)
+        self.assertEqual(result["card"]["title"], "归档编辑后")
+        self.assertEqual(result["card"]["description"], "<p>新描述</p>")
+        self.assertEqual(result["card"]["archived"], 1)
+        self.assertEqual(result["card"]["column_id"], column["id"])
+        self.assertEqual(result["revision"], revision + 1)
+        with self.assertRaises(app.ApiError) as raised:
+            app.update_card(self.conn, card["id"], {**payload, "expected_version": archived["version"]})
+        self.assertEqual(raised.exception.code, "VERSION_CONFLICT")
+        # 归档卡片可上传、覆盖、删除附件
+        uploaded = app.save_attachment(self.conn, card["id"], "new.txt", "text/plain", io.BytesIO(b"new"), 3)
+        self.assertEqual(app.get_card(self.conn, card["id"], include_draft=True)["attachment_count"], 2)
+        replaced = app.save_attachment(self.conn, card["id"], "new.txt", "text/plain", io.BytesIO(b"v2"), 2, True, uploaded["version"])
+        self.assertEqual(replaced["version"], 2)
+        app.delete_attachment(self.conn, replaced["id"], replaced["version"])
+        self.assertEqual(app.get_card(self.conn, card["id"], include_draft=True)["attachment_count"], 1)
+        # 恢复后编辑内容保持
+        restored = self.restore_card(card["id"])["card"]
+        self.assertEqual(restored["title"], "归档编辑后")
+        self.assertEqual(restored["attachment_count"], 1)
 
     def test_json_export_metadata_and_full_backup(self):
         card = self.create_card(app.list_columns(self.conn)[0]["id"], "备份")

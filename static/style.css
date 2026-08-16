@@ -2176,7 +2176,8 @@ textarea:focus-visible,
 /* ============ 批量操作 ============ */
 .batch-bar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:8px;padding:9px 14px;border:1px solid var(--border);border-radius:var(--radius-column,12px);background:var(--surface-menu,var(--surface-card));box-shadow:var(--shadow-hover,0 8px 24px rgba(0,0,0,.18));color:var(--text);font-size:13px;}
 .batch-bar button{white-space:nowrap;}
-.result-item{position:relative;}
+.result-item{position:relative;cursor:pointer;}
+.result-item:hover{border-color:color-mix(in srgb,var(--primary) 45%,var(--border));}
 .result-item:has(.history-select-box){padding-left:38px;}
 .history-select-box{position:absolute;top:10px;left:10px;width:16px;height:16px;margin:0;accent-color:var(--primary);}
 #board-batch-toggle.active{color:var(--text-on-accent);background:var(--primary);border-color:var(--primary);}

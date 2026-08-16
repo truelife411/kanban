@@ -61,8 +61,6 @@ def save_attachment(conn, card_id, file_name, content_type, input_stream, conten
                 card = conn.execute("SELECT id,archived,is_draft FROM cards WHERE id=?", (card_id,)).fetchone()
                 if card is None:
                     raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
-                if card["archived"]:
-                    raise ApiError("归档卡片不能修改附件，请先恢复", 409, "CARD_ARCHIVED")
                 existing = conn.execute("SELECT * FROM attachments WHERE card_id=? AND name_key=?", (card_id, attachment_name_key(file_name))).fetchone()
                 if existing is not None and not replace:
                     _attachment_conflict(existing)
@@ -134,8 +132,6 @@ def delete_attachment(conn, attachment_id, expected_version=None):
             try:
                 row = get_attachment(conn, attachment_id)
                 card = conn.execute("SELECT archived,is_draft FROM cards WHERE id=?", (row["card_id"],)).fetchone()
-                if card and card["archived"]:
-                    raise ApiError("归档卡片不能删除附件，请先恢复", 409, "CARD_ARCHIVED")
                 if expected_version is None or row["version"] != expected_version:
                     raise ApiError("附件已在其他页面被更新，请刷新后重试", 409, "ATTACHMENT_VERSION_CONFLICT")
                 path = attachment_path(row["card_id"], row["file_name"])

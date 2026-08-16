@@ -179,10 +179,17 @@ def update_card(conn, cid, data):
     if requested_position is not None:
         requested_position = require_int(requested_position, "position", 0)
     with transaction(conn):
-        row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
+        row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=0", (cid,)).fetchone()
         if row is None:
             raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
         check_version(row, data.get("expected_version"), required=True); check_revision(conn, data.get("expected_board_revision"), required=True)
+        if row["archived"]:
+            # 归档卡片:允许编辑内容字段,保持归档状态;列/位置/计划日期不变
+            ts = now_iso()
+            conn.execute("UPDATE cards SET title=?,description=?,labels=?,due_date=?,priority=?,updated_at=?,version=version+1 WHERE id=?",
+                         (fields["title"], fields["description"], fields["labels"], fields["due_date"], fields["priority"], ts, cid))
+            revision = bump_revision(conn)
+            return {"card": get_card(conn, cid), "revision": revision}
         target_column = active_column(conn, target_column_id)
         source_column_id = row["column_id"]
         source_ids = _active_card_ids(conn, source_column_id, cid)

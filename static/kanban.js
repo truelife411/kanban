@@ -1566,12 +1566,15 @@ function getDragAfterElement(container, y){
     })
     .element
 }
-function populateCardColumns(selected){
+function populateCardColumns(selected, extra){
     const select = document.getElementById("card-column");
     clearChildren(select);
     state.columns.forEach(column => {
         const option = document.createElement("option"); option.value = column.id; option.textContent = column.name; option.selected = column.id === selected; select.appendChild(option)
     });
+    if (extra && !state.columns.some(column => column.id === extra.value)){
+        const option = document.createElement("option"); option.value = extra.value; option.textContent = extra.label; option.selected = true; select.appendChild(option)
+    }
     syncThemedSelect(select)
 }
 function cardSnapshot(){
@@ -1614,20 +1617,29 @@ async function openNewCard(columnId){
     syncCardTimeControl();
     document.getElementById("card-meta").textContent = "草稿已创建，可立即添加附件";
     populateCardColumns(columnId);
+    document.getElementById("card-column-field").hidden = false;
     document.getElementById("card-move-controls").hidden = true;
     openModal("card-modal", document.activeElement, "card-title");
     state.initialCardSnapshot = cardSnapshot();
     renderAttachments()
 }
-function openEditCard(cardId){
-    const card = state.cards.find(item => item.id === cardId);
-    if (!card) return;
+async function openEditCard(cardId){
+    let card = state.cards.find(item => item.id === cardId) || state.searchResults.get(cardId);
+    if (!card){
+        try {
+            card = await api("GET", `/api/cards/${cardId}`)
+        } catch (error){
+            toast("卡片加载失败：" + error.message, true);
+            return
+        }
+    }
+    const archived = Boolean(card.archived);
     state.currentCardId = cardId;
     state.currentCardVersion = card.version;
     state.currentCardDraft = false;
     state.currentCardCol = card.column_id;
     resetAttachmentState();
-    document.querySelector(".card-archive-btn").hidden = false;
+    document.querySelector(".card-archive-btn").hidden = archived;
     document.querySelector(".card-permanent-delete-btn").hidden = false;
     document.getElementById("modal-title-text").textContent = "编辑卡片";
     document.getElementById("card-title").value = card.title;
@@ -1639,10 +1651,13 @@ function openEditCard(cardId){
     document.getElementById("card-due-time").value = due.time;
     syncCardTimeControl();
     document.getElementById("card-priority").value = card.priority;
-    document.getElementById("card-meta").textContent = `创建于 ${card.created_at}　更新于 ${card.updated_at}`;
-    populateCardColumns(card.column_id);
-    document.getElementById("card-move-controls").hidden = isManualReorderDisabled();
-    openModal("card-modal", document.querySelector(`.card[data-card-id="${cardId}"]`), "card-title");
+    document.getElementById("card-meta").textContent = `创建于 ${card.created_at}　更新于 ${card.updated_at}${archived ? "　（已归档，保存后保持归档状态）": ""}`;
+    populateCardColumns(card.column_id, archived ? {
+        value: card.column_id, label: card.column_name || "原列"
+    } : null);
+    document.getElementById("card-column-field").hidden = archived;
+    document.getElementById("card-move-controls").hidden = isManualReorderDisabled() || archived;
+    openModal("card-modal", document.querySelector(`.card[data-card-id="${cardId}"]`) || document.querySelector(`.result-item[data-card-id="${cardId}"]`), "card-title");
     state.initialCardSnapshot = cardSnapshot();
     loadAttachments(cardId)
 }
@@ -1704,8 +1719,8 @@ async function saveCard(){
     }
     state.saving = true;
     setBusy(button, true, "保存中…");
-    const selectedColumn = Number(snapshot.column), payload = {
-        column_id: selectedColumn, title, description: snapshot.description.trim(), labels: snapshot.labels.trim(), due_date: joinDue(snapshot.due, snapshot.time), priority: snapshot.priority, expected_board_revision: state.revision
+    const selectedColumn = Number(snapshot.column), currentCard = state.cards.find(item => item.id === state.currentCardId) || state.searchResults.get(state.currentCardId), payload = {
+        column_id: selectedColumn, title, description: snapshot.description.trim(), labels: snapshot.labels.trim(), due_date: joinDue(snapshot.due, snapshot.time), priority: snapshot.priority, planned_date: currentCard?.planned_date || "", expected_board_revision: state.revision
     };
     try {
         let saved;
@@ -1715,7 +1730,11 @@ async function saveCard(){
             });
             state.currentCardDraft = false
         } else {
-            const card = state.cards.find(item => item.id === state.currentCardId);
+            const card = state.cards.find(item => item.id === state.currentCardId) || state.searchResults.get(state.currentCardId);
+            if (!card){
+                toast("卡片数据已失效，请刷新后重试", true);
+                return false
+            }
             saved = await api("PUT", `/api/cards/${card.id}`, {
                 ...payload, expected_version: card.version
             })
@@ -1724,6 +1743,9 @@ async function saveCard(){
         state.revision = saved.revision;
         state.initialCardSnapshot = cardSnapshot();
         await refresh(true);
+        if (currentCard?.archived && !document.getElementById("view-history").hidden){
+            await doSearch()
+        }
         if (attachmentWorkPending()){
             document.getElementById("card-meta").textContent = "卡片已保存，附件继续上传中";
             toast("卡片已保存，附件继续上传中")
@@ -1771,7 +1793,7 @@ async function archiveCard(card){
     }
 }
 function currentCardForAction(){
-    return state.cards.find(item => item.id === state.currentCardId)
+    return state.cards.find(item => item.id === state.currentCardId) || state.searchResults.get(state.currentCardId)
 }
 async function archiveCurrentCard(){
     if (state.currentCardDraft) return closeCardModal();
@@ -1812,7 +1834,7 @@ async function permanentlyDeleteCurrentCard(){
     if (state.currentCardDraft) return closeCardModal();
     const card = currentCardForAction();
     if (card) await permanentlyDeleteCard(card, {
-        fromEditor: true, unsaved: Boolean(isCardDirty())
+        fromEditor: true, fromHistory:!document.getElementById("view-history").hidden, unsaved: Boolean(isCardDirty())
     })
 }
 async function moveCurrentCard(direction){
@@ -2185,6 +2207,19 @@ function renderResult(card){
     const element = document.createElement("div");
     element.className = "result-item priority-" + card.priority;
     element.dataset.cardId = card.id;
+    element.tabIndex = 0;
+    element.setAttribute("role", "button");
+    element.setAttribute("aria-label", `编辑卡片“${card.title}”`);
+    element.addEventListener("click", event => {
+        if (event.target.closest("button, input, select, label")) return;
+        openEditCard(card.id)
+    });
+    element.addEventListener("keydown", event => {
+        if ((event.key === "Enter" || event.key === " ") && event.target === element){
+            event.preventDefault();
+            openEditCard(card.id)
+        }
+    });
     const query =(document.getElementById("search-q").value || "").trim();
     const terms = query ? query.toLocaleLowerCase().split(/\s+/).filter(Boolean):[];
     const title = document.createElement("div");

@@ -360,6 +360,31 @@ class HttpApiTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertEqual(json.loads(body)["error"]["code"], code)
 
+    def test_archived_card_http_edit_and_attachment(self):
+        result = self.create_card("归档编辑")
+        card = result["card"]
+        status, _, body = self.request("DELETE", f"/api/cards/{card['id']}", {
+            "expected_version": card["version"], "expected_board_revision": result["revision"],
+        })
+        self.assertEqual(status, 200)
+        archive_response = json.loads(body)
+        # 归档后编辑内容字段
+        status, _, body = self.request("PUT", f"/api/cards/{card['id']}", {
+            "column_id": card["column_id"], "title": "归档后新标题", "description": "", "labels": "",
+            "due_date": "", "planned_date": "", "priority": "low",
+            "expected_version": archive_response["version"], "expected_board_revision": archive_response["revision"],
+        })
+        self.assertEqual(status, 200)
+        updated = json.loads(body)
+        self.assertEqual(updated["card"]["title"], "归档后新标题")
+        self.assertEqual(updated["card"]["archived"], 1)
+        # 归档后上传与删除附件
+        status, _, body = self.upload(card["id"], "after.txt", b"after")
+        self.assertEqual(status, 201)
+        attachment = json.loads(body)
+        status, _, body = self.raw_request("DELETE", f"/api/attachments/{attachment['id']}", b"", {"X-Attachment-Version": str(attachment["version"])})
+        self.assertEqual(status, 200)
+
     def test_batch_archive_restore_and_permanent_delete(self):
         first_result = self.create_card("批量 A")
         second_result = self.create_card("批量 B")
