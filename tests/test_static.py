@@ -31,6 +31,14 @@ class AccessibilityContractTests(unittest.TestCase):
         cls.parser = ElementIndex()
         cls.parser.feed(cls.html)
 
+    @staticmethod
+    def compact(value):
+        return re.sub(r"\s+", "", value)
+
+    @classmethod
+    def compact_app_js(cls):
+        return cls.compact((ROOT / "static" / "kanban.js").read_text(encoding="utf-8"))
+
     def test_dialogs_have_modal_semantics_and_valid_labels(self):
         dialogs = [attrs for _, attrs in self.parser.elements if attrs.get("role") == "dialog"]
         self.assertGreaterEqual(len(dialogs), 2)
@@ -53,21 +61,21 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('id="add-column-button"', self.html)
 
     def test_auto_archive_tooltip_is_delayed_on_completed_header(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         compact_css = "".join(self.css.split())
-        self.assertIn('column.name.trim()==="已完成"', app_js)
+        self.assertIn("column.name.trim()===\"已完成\"", app_js)
         self.assertNotIn("auto-archive-hint", app_js + self.css)
         self.assertIn("auto-archive-tooltip", app_js)
-        self.assertIn('setAttribute("role","tooltip")', app_js)
-        self.assertIn("满 30 天后", app_js)
+        self.assertIn("setAttribute(\"role\",\"tooltip\")", app_js)
+        self.assertIn("满30天后", app_js)
         self.assertIn("setTimeout(()=>", app_js)
         self.assertIn("},1000)", app_js)
         self.assertIn("clearTimeout(autoArchiveTooltipTimer)", app_js)
         self.assertIn("header.isConnected", app_js)
-        self.assertIn('closest(".column-actions")', app_js)
-        self.assertIn('addEventListener("pointerdown",hideAutoArchiveTooltip)', app_js)
-        self.assertIn("function onColumnDragStart(event){hideAutoArchiveTooltip()", app_js)
-        self.assertIn("function renderBoard(keepScroll=false){hideAutoArchiveTooltip()", app_js)
+        self.assertIn("closest(\".column-actions\")", app_js)
+        self.assertIn("addEventListener(\"pointerdown\",hideAutoArchiveTooltip)", app_js)
+        self.assertIn("functiononColumnDragStart(event){hideAutoArchiveTooltip()", app_js)
+        self.assertIn("functionrenderBoard(keepScroll=false){hideAutoArchiveTooltip()", app_js)
         self.assertIn(".auto-archive-tooltip{position:absolute", compact_css)
         self.assertIn("pointer-events:none", compact_css)
 
@@ -78,15 +86,15 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('aria-controls="view-board"', self.html)
         self.assertIn('aria-controls="view-today"', self.html)
         self.assertIn('aria-controls="view-history"', self.html)
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         self.assertIn("setupViewTabs", app_js)
-        self.assertIn('event.key==="ArrowRight"', app_js)
-        self.assertIn('event.key==="ArrowLeft"', app_js)
-        self.assertIn('event.key==="Home"', app_js)
-        self.assertIn('event.key==="End"', app_js)
+        self.assertIn("event.key===\"ArrowRight\"", app_js)
+        self.assertIn("event.key===\"ArrowLeft\"", app_js)
+        self.assertIn("event.key===\"Home\"", app_js)
+        self.assertIn("event.key===\"End\"", app_js)
 
     def test_today_center_markup_and_behavior_contract(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         for element_id in (
             "btn-today", "view-today", "today-date", "today-pending-count",
             "today-completed-count", "today-overdue-count", "today-quick-add",
@@ -102,29 +110,29 @@ class AccessibilityContractTests(unittest.TestCase):
             "updateTodayCardDue", "openTodayDueDialogFor", "renderTodayDueControl", "setupTodayPlanDrop", "quickAddToday",
         ):
             self.assertIn(function_name, app_js)
-        self.assertIn('`/api/cards/${card.id}/plan`', app_js)
-        self.assertIn('due_date:localDateKey()', app_js)
-        self.assertIn('planned_date:localDateKey()', app_js)
-        self.assertIn('normalizedColumnName(column.name)==="待办"', app_js)
-        self.assertIn('const overdue=active.filter(card=>dueDatePart(card.due_date)<today&&Boolean(dueDatePart(card.due_date)))', app_js)
-        self.assertIn('!overdueIds.has(card.id)&&(isTodo(card)||card.planned_date===today||dueDatePart(card.due_date)===today)', app_js)
-        self.assertIn('!currentIds.has(card.id)&&dueDatePart(card.due_date)===tomorrow', app_js)
-        self.assertIn('reasons.push("待办任务")', app_js)
-        self.assertNotIn('reasons.push("已加入今日")', app_js)
-        self.assertIn('reasons.push("今日截止")', app_js)
+        self.assertIn("`/api/cards/${card.id}/plan`", app_js)
+        self.assertIn("due_date:localDateKey()", app_js)
+        self.assertIn("planned_date:localDateKey()", app_js)
+        self.assertIn("normalizedColumnName(column.name)===\"待办\"", app_js)
+        self.assertIn("constoverdue=active.filter(card=>dueDatePart(card.due_date)<today&&Boolean(dueDatePart(card.due_date)))", app_js)
+        self.assertIn("!overdueIds.has(card.id)&&(isTodo(card)||card.planned_date===today||dueDatePart(card.due_date)===today)", app_js)
+        self.assertIn("!currentIds.has(card.id)&&dueDatePart(card.due_date)===tomorrow", app_js)
+        self.assertIn("reasons.push(\"待办任务\")", app_js)
+        self.assertNotIn("reasons.push(\"已加入今日\")", app_js)
+        self.assertIn("reasons.push(\"今日截止\")", app_js)
         self.assertNotIn("toggleTodayPlan", app_js)
         self.assertNotIn("today-plan-action", app_js)
-        self.assertIn('group==="done"?reopenTodayCard(card):completeTodayCard(card)', app_js)
-        self.assertIn('normalizedColumnName(column.name)==="待办"', app_js)
-        self.assertIn('button.textContent="修改截止日期"', app_js)
-        self.assertIn('title.textContent="修改截止日期和时间"', app_js)
-        self.assertIn('dialog.className="modal small today-due-dialog"', app_js)
-        self.assertIn('buildField("date",dateId,"截止日期",due.date)', app_js)
-        self.assertIn('buildField("time",timeId,"截止时间",due.time)', app_js)
-        self.assertIn('save.textContent="保存"', app_js)
+        self.assertIn("group===\"done\"?reopenTodayCard(card):completeTodayCard(card)", app_js)
+        self.assertIn("normalizedColumnName(column.name)===\"待办\"", app_js)
+        self.assertIn("button.textContent=\"修改截止日期\"", app_js)
+        self.assertIn("title.textContent=\"修改截止日期和时间\"", app_js)
+        self.assertIn("dialog.className=\"modalsmalltoday-due-dialog\"", app_js)
+        self.assertIn("buildField(\"date\",dateId,\"截止日期\",due.date)", app_js)
+        self.assertIn("buildField(\"time\",timeId,\"截止时间\",due.time)", app_js)
+        self.assertIn("save.textContent=\"保存\"", app_js)
         self.assertNotIn("openTodayDueMenu", app_js)
         self.assertNotIn("today-due-menu", app_js)
-        self.assertIn('planned_date:card.planned_date||""', app_js)
+        self.assertIn("planned_date:card.planned_date||\"\"", app_js)
         self.assertNotIn("todayLaterExpanded", app_js)
         self.assertNotIn("todayLaterExpanded", (ROOT / "static" / "js" / "state.js").read_text(encoding="utf-8"))
         for label in ("逾期", "今日", "稍后", "今日已完成", "今天", "明天", "后天", "本周五", "下周五", "月底", "清除"):
@@ -142,7 +150,7 @@ class AccessibilityContractTests(unittest.TestCase):
 
     def test_theme_settings_and_themes_exist(self):
         theme_init_js = (ROOT / "static" / "theme-init.js").read_text(encoding="utf-8")
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         themes = ("mint", "douban-green", "swiss-mono", "sea-salt-blue", "oat", "pearl", "liquid-glass", "deep-sea-night", "aurora", "aurora-glass", "pixel-arcade", "forest-night", "mist-pine-night", "ink-wash")
         theme_names = ("薄荷绿", "豆瓣绿", "黑白", "海盐蓝", "燕麦", "珍珠", "玻璃", "深海夜", "极光", "极光玻璃", "像素街机", "森林夜", "雾凇夜", "水墨山水")
         legacy_themes = (
@@ -222,7 +230,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn(':root[data-theme="deep-sea-night"].card', deep_sea_block)
 
     def test_card_modal_field_order_and_styled_confirmations(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         expected = ["card-title", "card-description", "card-labels", "card-due", "card-priority", "attachment-field", "card-column", "card-move-controls"]
         positions = [self.html.index(f'id="{value}"') for value in expected]
         self.assertEqual(positions, sorted(positions))
@@ -231,8 +239,8 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn("alert(", app_js)
         self.assertIn("取消新建卡片？", app_js)
         self.assertIn("放弃未保存的修改？", app_js)
-        self.assertIn('title=editing?"重命名列":"新增列"', app_js)
-        self.assertIn('primaryClass:"ghost",focus:"cancel",opener', app_js)
+        self.assertIn("title=editing?\"重命名列\":\"新增列\"", app_js)
+        self.assertIn("primaryClass:\"ghost\",focus:\"cancel\",opener", app_js)
         self.assertIn("setupButtonTooltips", app_js)
         self.assertEqual(self.html.count('class="themed-select"'), 2)
         self.assertIn('data-select-id="card-priority"', self.html)
@@ -242,7 +250,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('.themed-select-menu button[aria-selected="true"]', self.css)
 
     def test_attachment_ui_contract(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         attachment_input = next(attrs for _, attrs in self.parser.elements if attrs.get("id") == "attachment-input")
         self.assertIn("multiple", attachment_input)
         self.assertIn('aria-live="polite"', self.html)
@@ -252,15 +260,15 @@ class AccessibilityContractTests(unittest.TestCase):
             self.assertIn(selector, self.css)
         self.assertIn("application/zip,.zip", self.html)
         self.assertIn("完整备份（含附件）", self.html)
-        self.assertIn('fetch("/api/backup/check")', app_js)
-        self.assertIn('fetch("/api/backup")', app_js)
+        self.assertIn("fetch(\"/api/backup/check\")", app_js)
+        self.assertIn("fetch(\"/api/backup\")", app_js)
         self.assertIn("response.blob()", app_js)
         self.assertIn("downloadBlob", app_js)
         self.assertIn("INCOMPLETE_BACKUP", app_js)
-        self.assertNotIn('download("/api/backup")', app_js)
+        self.assertNotIn("download(\"/api/backup\")", app_js)
 
     def test_native_date_controls_are_styled_and_accessible(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         dates_js = (ROOT / "static" / "js" / "dates.js").read_text(encoding="utf-8")
         due = next(attrs for _, attrs in self.parser.elements if attrs.get("id") == "card-due")
         due_time = next(attrs for _, attrs in self.parser.elements if attrs.get("id") == "card-due-time")
@@ -297,7 +305,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn(".time-clear-btn", self.css)
 
     def test_scripts_and_static_actions_are_csp_compatible(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         self.assertTrue((ROOT / "static" / "theme-init.js").is_file())
         self.assertEqual([script.get("src") for script in self.parser.scripts], ["/static/theme-init.js", "/static/kanban.js"])
         for _, attributes in self.parser.elements:
@@ -306,7 +314,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn("window.showView=", app_js)
 
     def test_es_module_and_busy_state_contracts(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         self.assertIn('type="module"', self.html)
         for module in ("state.js", "api.js", "ui.js", "dates.js"):
             self.assertTrue((ROOT / "static" / "js" / module).is_file())
@@ -318,23 +326,23 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('id="choice-modal"', self.html)
 
     def test_description_wysiwyg_contract(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         compact_css = "".join(self.css.split())
         self.assertIn(".card-desc{", compact_css)
         self.assertIn("white-space:pre-wrap", compact_css)
         self.assertIn(".card-descp,.card-descdiv,.editorp,.editordiv{margin:0;min-height:1.5em;}", compact_css)
         self.assertIn(".card-descul,.card-descol,.editorul,.editorol{padding-left:24px;margin:4px0;white-space:normal;}", compact_css)
-        self.assertIn('description.innerHTML=card.description', app_js)
-        self.assertNotIn('description.textContent=stripHtml(card.description)', app_js)
+        self.assertIn("description.innerHTML=card.description", app_js)
+        self.assertNotIn("description.textContent=stripHtml(card.description)", app_js)
         self.assertIn(".result-descp,.result-descdiv{margin:0;min-height:1.5em;}", compact_css)
         self.assertIn(".result-descul,.result-descol{padding-left:24px;margin:4px0;white-space:normal;}", compact_css)
-        self.assertIn('document.getElementById("card-description").innerHTML=hydrateDescriptionHtml(card.description)', app_js)
-        self.assertIn('description:normalizeDescriptionHtml(document.getElementById("card-description").innerHTML)', app_js)
-        self.assertIn("function normalizeDescriptionHtml", app_js)
-        self.assertIn('tag==="strike"', app_js)
+        self.assertIn("document.getElementById(\"card-description\").innerHTML=hydrateDescriptionHtml(card.description)", app_js)
+        self.assertIn("description:normalizeDescriptionHtml(document.getElementById(\"card-description\").innerHTML)", app_js)
+        self.assertIn("functionnormalizeDescriptionHtml", app_js)
+        self.assertIn("tag===\"strike\"", app_js)
 
     def test_rich_text_color_controls_are_safe_and_accessible(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         compact_css = "".join(self.css.split())
         for element_id in ("text-color-button", "text-color-menu", "highlight-color-button", "highlight-color-menu"):
             self.assertIn(f'id="{element_id}"', self.html)
@@ -347,7 +355,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn("backColor", app_js)
         self.assertIn("RICH_TEXT_COLORS", app_js)
         self.assertIn("请先选择文字", app_js)
-        self.assertIn('event.key==="Escape"', app_js)
+        self.assertIn("event.key===\"Escape\"", app_js)
         for color_class in ("rt-fg-red", "rt-fg-yellow", "rt-fg-green", "rt-fg-blue", "rt-fg-purple", "rt-bg-red", "rt-bg-yellow", "rt-bg-green", "rt-bg-blue", "rt-bg-purple"):
             self.assertIn(color_class, self.html)
             self.assertIn(color_class, self.css)
@@ -380,7 +388,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn('padding-inline:.08em', compact_css)
 
     def test_archive_and_permanent_delete_contract(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         ui_js = (ROOT / "static" / "js" / "ui.js").read_text(encoding="utf-8")
         compact_css = "".join(self.css.split())
         self.assertIn('id="card-archive-button"', self.html)
@@ -388,35 +396,35 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"', self.html)
         self.assertIn("archiveCurrentCard", app_js)
         self.assertNotIn("deleteCurrentCard", app_js)
-        self.assertIn('`/api/cards/${card.id}/permanent`', app_js)
+        self.assertIn("`/api/cards/${card.id}/permanent`", app_js)
         self.assertIn("permanentlyDeleteCard(card,{fromHistory:true,unsaved:false})", app_js)
-        self.assertIn("附件：${count} 个", app_js)
+        self.assertIn("附件：${count}个", app_js)
         self.assertIn("未保存修改", app_js)
         self.assertIn("此操作不可撤销", app_js)
-        self.assertIn('focus:"cancel"', app_js)
+        self.assertIn("focus:\"cancel\"", app_js)
         self.assertIn('focus === "cancel"', ui_js)
         self.assertIn("history-permanent-delete", app_js)
-        self.assertIn('remove.innerHTML=\'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg>\'', app_js)
-        self.assertIn('remove.title="永久删除卡片"', app_js)
-        self.assertNotIn('remove.textContent="永久删除"', app_js)
-        self.assertIn('primaryClass:"ghost"', app_js)
-        permanent_delete = app_js[app_js.index("function permanentDeleteMessage"):app_js.index("async function permanentlyDeleteCard")]
+        self.assertIn("remove.innerHTML='<svgviewBox=\"002424\"aria-hidden=\"true\"><pathd=\"M47h16M911v6m6-6v6M87l1-3h6l13m20-114H7L67\"/></svg>'", app_js)
+        self.assertIn("remove.title=\"永久删除卡片\"", app_js)
+        self.assertNotIn("remove.textContent=\"永久删除\"", app_js)
+        self.assertIn("primaryClass:\"ghost\"", app_js)
+        permanent_delete = app_js[app_js.index("functionpermanentDeleteMessage"):app_js.index("asyncfunctionpermanentlyDeleteCard")]
         self.assertNotIn('danger:true', permanent_delete)
         self.assertIn('primaryButton.className = primaryClass ||', ui_js)
         self.assertNotIn("opacity:0", compact_css[compact_css.index(".history-card-actions.history-permanent-delete{"):compact_css.index(".history-card-actions.history-permanent-delete{") + 500])
-        self.assertIn('if(!card.archived){const actions=document.createElement("div");actions.className="result-actions history-card-actions"', app_js)
+        self.assertIn("if(!card.archived){constactions=document.createElement(\"div\");actions.className=\"result-actionshistory-card-actions\"", app_js)
 
     def test_svg_icon_contract_replaces_legacy_emoji(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         markup = self.html + app_js
         for class_name in ("svg-icon", "column-action-icon", "card-meta-icon"):
             self.assertIn(class_name, markup)
-        self.assertRegex(markup, r'<svg[^>]+class=["\'][^"\']*(?:svg-icon|column-action-icon|card-meta-icon)')
+        self.assertRegex(markup, r'<svg[^>]*class=["\'][^"\']*(?:svg-icon|column-action-icon|card-meta-icon)')
         for legacy_icon in ("📎", "📅", "✎", "🗑"):
             self.assertNotIn(legacy_icon, markup)
 
     def test_settings_and_card_description_preference_contract(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         state_js = (ROOT / "static" / "js" / "state.js").read_text(encoding="utf-8")
         compact_css = "".join(self.css.split())
         for element_id in ("settings-button", "view-settings", "settings-back-button", "board-display-title", "appearance-title", "data-management-title"):
@@ -426,15 +434,15 @@ class AccessibilityContractTests(unittest.TestCase):
             self.assertIn(f'value="{value}"', self.html)
         self.assertIn('value="two-lines" checked', self.html)
         self.assertIn('cardDescriptionDisplay: "two-lines"', state_js)
-        self.assertIn('CARD_DESCRIPTION_STORAGE_KEY="kanban-card-description-display"', app_js)
+        self.assertIn("CARD_DESCRIPTION_STORAGE_KEY=\"kanban-card-description-display\"", app_js)
         self.assertIn("CARD_DESCRIPTION_OPTIONS.has(value)", app_js)
         self.assertIn("localStorage.getItem(CARD_DESCRIPTION_STORAGE_KEY)", app_js)
         self.assertIn("localStorage.setItem(CARD_DESCRIPTION_STORAGE_KEY,state.cardDescriptionDisplay)", app_js)
         self.assertRegex(app_js, r'CARD_DESCRIPTION_OPTIONS\.has\(value\)\?value:"two-lines"')
         self.assertRegex(app_js, r'catch\(_\)\{state\.cardDescriptionDisplay="two-lines"\}')
         self.assertLess(app_js.index("loadCardDescriptionPreference()"), app_js.index("refresh(true)"))
-        self.assertIn('state.cardDescriptionDisplay!=="none"', app_js)
-        self.assertIn('description.classList.add(state.cardDescriptionDisplay)', app_js)
+        self.assertIn("state.cardDescriptionDisplay!==\"none\"", app_js)
+        self.assertIn("description.classList.add(state.cardDescriptionDisplay)", app_js)
         self.assertIn(".card-desc.one-line,.card-desc.two-lines{overflow:hidden;}", compact_css)
         self.assertIn(".card-desc.one-line{max-height:1.45em;}", compact_css)
         self.assertIn(".card-desc.two-lines{max-height:2.9em;}", compact_css)
@@ -442,22 +450,22 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn(".data-actions{", compact_css)
 
     def test_history_restore_uses_matched_active_column(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         self.assertIn("state.columns.find(column=>column.id===card.restore_column_id)", app_js)
         self.assertIn("restoreCard(card,card.restore_column_id||undefined)", app_js)
         self.assertNotIn("button.onclick=()=>restoreCard(card);", app_js)
 
     def test_filter_reorder_and_compatibility_contracts(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         ui_js = (ROOT / "static" / "js" / "ui.js").read_text(encoding="utf-8")
         hint = next(attrs for _, attrs in self.parser.elements if attrs.get("id") == "filter-reorder-hint")
         self.assertIn("hidden", hint)
         self.assertLess(self.html.index('id="filter-reorder-hint"'), self.html.index('id="board"'))
-        self.assertIn('document.getElementById("filter-reorder-hint").hidden=!isManualReorderDisabled()', app_js)
-        self.assertNotIn('createElement("div");hint.className="filter-reorder-hint"', app_js)
+        self.assertIn("document.getElementById(\"filter-reorder-hint\").hidden=!isManualReorderDisabled()", app_js)
+        self.assertNotIn("createElement(\"div\");hint.className=\"filter-reorder-hint\"", app_js)
         self.assertIn("header.draggable=!isManualReorderDisabled()", app_js)
-        self.assertIn('if(isManualReorderDisabled()||event.target.closest(".column-actions")', app_js)
-        self.assertIn('if(isManualReorderDisabled()||colDrag.colId==null)return', app_js)
+        self.assertIn("if(isManualReorderDisabled()||event.target.closest(\".column-actions\")", app_js)
+        self.assertIn("if(isManualReorderDisabled()||colDrag.colId==null)return", app_js)
         self.assertNotIn("||=", app_js + ui_js)
         self.assertIn("export function clearChildren", ui_js)
         self.assertIn('typeof node.replaceChildren === "function"', ui_js)
@@ -466,10 +474,10 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn("clearChildren(dueBox)", app_js)
         self.assertIn("clearCardDragPreview", app_js)
         self.assertIn("cardDragPreview=preview", app_js)
-        self.assertIn("void event.currentTarget.offsetWidth", app_js)
+        self.assertIn("voidevent.currentTarget.offsetWidth", app_js)
         self.assertNotIn("requestAnimationFrame(()=>preview.remove())", app_js)
-        self.assertIn('document.addEventListener("pointerdown",closeOpenMenusFromPointer,true)', app_js)
-        self.assertNotIn('document.addEventListener("click",event=>{if(openColorMenu', app_js)
+        self.assertIn("document.addEventListener(\"pointerdown\",closeOpenMenusFromPointer,true)", app_js)
+        self.assertNotIn("document.addEventListener(\"click\",event=>{if(openColorMenu", app_js)
         self.assertNotIn(".replaceChildren()", app_js)
         compact_css = "".join(self.css.split())
         self.assertIn(".board-view{", compact_css)
@@ -483,7 +491,7 @@ class AccessibilityContractTests(unittest.TestCase):
 
     def test_application_owned_picker_contract(self):
         dates_js = (ROOT / "static" / "js" / "dates.js").read_text(encoding="utf-8")
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         compact_css = "".join(self.css.split())
         self.assertIn("input.disabled || input.readOnly", dates_js)
         self.assertIn("openDateTimePicker", dates_js)
@@ -501,7 +509,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn(".owned-picker-day[aria-selected=\"true\"]", compact_css)
 
     def test_per_column_sort_contract(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         dates_js = (ROOT / "static" / "js" / "dates.js").read_text(encoding="utf-8")
         state_js = (ROOT / "static" / "js" / "state.js").read_text(encoding="utf-8")
         self.assertIn('id="filter-summary"', self.html)
@@ -516,18 +524,18 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn("new Date(value)", dates_js)
         self.assertIn("sortCards(cards,column.id).forEach", app_js)
         self.assertIn("renderColumnSort(column,actions)", app_js)
-        self.assertIn('aria-haspopup","menu', app_js)
-        self.assertIn('role","menuitemradio', app_js)
+        self.assertIn("aria-haspopup\",\"menu", app_js)
+        self.assertIn("role\",\"menuitemradio", app_js)
         self.assertIn("column-sort-button", app_js)
         self.assertIn("column-sort-menu", app_js)
         self.assertIn("card-created-text", app_js)
         self.assertNotIn("card-relative-time", app_js)
         self.assertNotIn("refreshRelativeTimes", app_js)
-        self.assertIn('document.getElementById("card-move-controls").hidden=isManualReorderDisabled()', app_js)
+        self.assertIn("document.getElementById(\"card-move-controls\").hidden=isManualReorderDisabled()", app_js)
         self.assertIn("SORT_STORAGE_KEY=\"kanban-column-sorts\"", app_js)
         self.assertIn("localStorage.getItem(SORT_STORAGE_KEY)", app_js)
         self.assertIn("localStorage.setItem(SORT_STORAGE_KEY,JSON.stringify(values))", app_js)
-        self.assertIn('localStorage.removeItem("kanban-card-sort")', app_js)
+        self.assertIn("localStorage.removeItem(\"kanban-card-sort\")", app_js)
         self.assertIn("sortByColumn", state_js)
         self.assertIn("return hasActiveFilters()", state_js)
         self.assertNotIn("state.sort=", app_js + state_js)
@@ -577,19 +585,19 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn("@media (max-width:380px)", self.css)
 
     def test_history_sort_and_full_timestamp_contract(self):
-        app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
+        app_js = self.compact_app_js()
         dates_js = (ROOT / "static" / "js" / "dates.js").read_text(encoding="utf-8")
         state_js = (ROOT / "static" / "js" / "state.js").read_text(encoding="utf-8")
         self.assertIn('id="history-sort-button"', self.html)
         self.assertIn('id="history-sort-menu"', self.html)
         for sort_value in ("archived_desc", "archived_asc", "updated_desc", "updated_asc", "created_desc", "created_asc"):
             self.assertIn(f'["{sort_value}",', app_js)
-        self.assertIn('HISTORY_SORT_STORAGE_KEY="kanban-history-sort"', app_js)
-        self.assertIn('params.set("sort",state.historySort)', app_js)
-        self.assertIn('state.searchCursor=null', app_js)
-        self.assertIn('role","menuitemradio', app_js)
+        self.assertIn("HISTORY_SORT_STORAGE_KEY=\"kanban-history-sort\"", app_js)
+        self.assertIn("params.set(\"sort\",state.historySort)", app_js)
+        self.assertIn("state.searchCursor=null", app_js)
+        self.assertIn("role\",\"menuitemradio", app_js)
         self.assertIn('historySort: "archived_desc"', state_js)
-        self.assertIn('`创建：${fullTimestamp(card.created_at)} | 更新：${fullTimestamp(card.updated_at)}`', app_js)
+        self.assertIn("`创建：${fullTimestamp(card.created_at)}|更新：${fullTimestamp(card.updated_at)}`", app_js)
         self.assertIn('String(date.getSeconds()).padStart(2, "0")', dates_js)
         self.assertIn(".history-sort-menu", self.css)
         self.assertIn(".result-times", self.css)
