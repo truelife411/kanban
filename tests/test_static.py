@@ -607,6 +607,14 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn("@media (max-width: 720px)", self.css)
         self.assertIn("prefers-reduced-motion", self.css)
 
+    def test_css_has_balanced_braces_and_no_stray_quote_lines(self):
+        self.assertEqual(self.css.count("{"), self.css.count("}"), "CSS 花括号不配平")
+        self.assertEqual(self.css.count("("), self.css.count(")"), "CSS 圆括号不配平")
+        for line in self.css.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith(("'", '"')):
+                self.fail("CSS 行以孤立引号开头(语法残留): %r" % line[:80])
+
 
 if __name__ == "__main__":
     unittest.main()

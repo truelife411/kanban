@@ -569,6 +569,31 @@ class BackupImportTests(DatabaseTestCase):
         self.assertEqual(after, before)
         self.assertFalse(any(name.endswith(".zip") or name.startswith(".kanban-full-") for name in after - before))
 
+    def test_json_import_rejects_invalid_board_state(self):
+        column = app.list_columns(self.conn)[0]
+        self.create_card(column["id"], "脏数据")
+        exported = app.export_data(self.conn)
+        cases = []
+        bad = json.loads(json.dumps(exported, ensure_ascii=False))
+        bad["cards"][0]["created_at"] = "not-a-date"
+        cases.append((bad, "INVALID_BOARD_TIMESTAMP"))
+        bad = json.loads(json.dumps(exported, ensure_ascii=False))
+        bad["cards"][0]["archived"] = 1
+        cases.append((bad, "INVALID_ARCHIVE_STATE"))
+        bad = json.loads(json.dumps(exported, ensure_ascii=False))
+        bad["cards"][0]["created_at"], bad["cards"][0]["updated_at"] = "2026-01-02 00:00:00", "2026-01-01 00:00:00"
+        cases.append((bad, "INVALID_BOARD_TIMESTAMP"))
+        bad = json.loads(json.dumps(exported, ensure_ascii=False))
+        bad["cards"][0]["archived"] = 1
+        bad["cards"][0]["archived_at"] = bad["cards"][0]["created_at"]
+        cases.append((bad, "INVALID_ARCHIVE_STATE"))
+        for payload, code in cases:
+            with self.subTest(code=code), self.assertRaises(app.ApiError) as raised:
+                app.import_replace(self.conn, {"data": payload, "expected_board_revision": app.board_revision(self.conn)})
+            self.assertEqual(raised.exception.code, code)
+        # 导入全部失败后原数据保持完整
+        self.assertEqual([card["title"] for card in app.list_cards(self.conn)], ["脏数据"])
+
 
     def test_search_cursor_paginates_without_duplicates(self):
         column = app.list_columns(self.conn)[0]
