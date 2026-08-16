@@ -67,7 +67,7 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertIn('closest(".column-actions")', app_js)
         self.assertIn('addEventListener("pointerdown",hideAutoArchiveTooltip)', app_js)
         self.assertIn("function onColumnDragStart(event){hideAutoArchiveTooltip()", app_js)
-        self.assertIn("function renderBoard(){hideAutoArchiveTooltip()", app_js)
+        self.assertIn("function renderBoard(keepScroll=false){hideAutoArchiveTooltip()", app_js)
         self.assertIn(".auto-archive-tooltip{position:absolute", compact_css)
         self.assertIn("pointer-events:none", compact_css)
 

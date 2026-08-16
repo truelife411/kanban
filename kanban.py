@@ -1390,6 +1390,152 @@ def copy_card(conn, cid, data=None):
     return {"card": get_card(conn, cur.lastrowid), "revision": revision, "attachments_copied": False}
 
 
+def _normalize_batch_items(data):
+    items = require_object(data).get("items")
+    if not isinstance(items, list) or not items:
+        fail("items 必须是非空数组", field="items")
+    if len(items) > 200:
+        fail("批量操作一次最多处理 200 张卡片", field="items")
+    result, seen = [], set()
+    for index, item in enumerate(items):
+        item = require_object(item)
+        cid = require_int(item.get("id"), "items.%d.id" % index, 1)
+        if cid in seen:
+            fail("卡片 id 不能重复", field="items.%d.id" % index)
+        seen.add(cid)
+        version = item.get("version")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            fail("缺少卡片版本", field="items.%d.version" % index)
+        result.append((cid, version))
+    return result
+
+
+def batch_archive_cards(conn, data):
+    items = _normalize_batch_items(data)
+    with transaction(conn):
+        check_revision(conn, data.get("expected_board_revision"), required=True)
+        ts = now_iso()
+        affected_columns, affected_planned_dates = set(), set()
+        for cid, expected_version in items:
+            row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=0 AND is_draft=0", (cid,)).fetchone()
+            if row is None:
+                raise ApiError("卡片不存在或已归档", 404, "CARD_NOT_FOUND")
+            check_version(row, expected_version, required=True)
+            conn.execute("UPDATE cards SET archived=1,archived_at=?,archive_reason='manual',updated_at=?,version=version+1 WHERE id=?", (ts, ts, cid))
+            affected_columns.add(row["column_id"])
+            if row["planned_date"]:
+                affected_planned_dates.add(row["planned_date"])
+        for column_id in affected_columns:
+            _rewrite_positions(conn, column_id, _active_card_ids(conn, column_id))
+        for planned_date in affected_planned_dates:
+            _rewrite_planned_positions(conn, planned_date)
+        revision = bump_revision(conn)
+    return {"ok": True, "count": len(items), "revision": revision}
+
+
+def _resolve_restore_target(conn, row, requested_target=None):
+    if requested_target is not None:
+        target_row = conn.execute("SELECT * FROM columns WHERE id=? AND deleted_at IS NULL", (requested_target,)).fetchone()
+        if target_row is None:
+            raise ApiError("指定的恢复列不存在或已删除", 404, "COLUMN_NOT_FOUND")
+        return target_row
+    target_row = conn.execute("SELECT * FROM columns WHERE id=? AND deleted_at IS NULL", (row["column_id"],)).fetchone()
+    if target_row is None:
+        original = conn.execute("SELECT name FROM columns WHERE id=?", (row["column_id"],)).fetchone()
+        if original is not None:
+            target_row = conn.execute(
+                "SELECT * FROM columns WHERE deleted_at IS NULL AND column_name_key(name)=? ORDER BY position,id LIMIT 1",
+                (column_name_key(original["name"]),),
+            ).fetchone()
+    if target_row is None:
+        target_row = conn.execute("SELECT * FROM columns WHERE deleted_at IS NULL ORDER BY position,id LIMIT 1").fetchone()
+    return target_row
+
+
+def batch_restore_cards(conn, data):
+    items = _normalize_batch_items(data)
+    target = data.get("target_column_id")
+    if target is not None:
+        target = require_int(target, "target_column_id", 1)
+    with transaction(conn):
+        check_revision(conn, data.get("expected_board_revision"), required=True)
+        ts = now_iso()
+        for cid, expected_version in items:
+            row = conn.execute("SELECT * FROM cards WHERE id=? AND archived=1 AND is_draft=0", (cid,)).fetchone()
+            if row is None:
+                raise ApiError("归档卡片不存在", 404, "CARD_NOT_FOUND")
+            check_version(row, expected_version, required=True)
+            target_row = _resolve_restore_target(conn, row, target)
+            if target_row is None:
+                raise ApiError("没有可用列", 409, "NO_ACTIVE_COLUMN")
+            ids = _active_card_ids(conn, target_row["id"], cid)
+            position = len(ids)
+            ids.insert(position, cid)
+            _rewrite_positions(conn, target_row["id"], ids)
+            completed_at = ts if is_completed_column(target_row) else None
+            conn.execute("UPDATE cards SET archived=0,column_id=?,position=?,completed_at=?,archived_at=NULL,archive_reason=NULL,updated_at=?,version=version+1 WHERE id=?",
+                         (target_row["id"], position, completed_at, ts, cid))
+        revision = bump_revision(conn)
+    return {"ok": True, "count": len(items), "revision": revision}
+
+
+def batch_permanently_delete_cards(conn, data):
+    items = _normalize_batch_items(data)
+    rollbacks = []
+    committed = False
+    with DB_MAINTENANCE_LOCK:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                check_revision(conn, data.get("expected_board_revision"), required=True)
+                affected_columns, affected_planned_dates = set(), set()
+                for cid, expected_version in items:
+                    row = conn.execute("SELECT * FROM cards WHERE id=? AND is_draft=0", (cid,)).fetchone()
+                    if row is None:
+                        raise ApiError("卡片不存在", 404, "CARD_NOT_FOUND")
+                    check_version(row, expected_version, required=True)
+                    directory = attachment_directory(cid)
+                    if os.path.isdir(directory):
+                        rollback = directory + ".permanent-delete-" + uuid.uuid4().hex
+                        os.replace(directory, rollback)
+                        rollbacks.append(rollback)
+                    conn.execute("DELETE FROM cards WHERE id=? AND is_draft=0", (cid,))
+                    if not row["archived"]:
+                        affected_columns.add(row["column_id"])
+                        if row["planned_date"]:
+                            affected_planned_dates.add(row["planned_date"])
+                for column_id in affected_columns:
+                    _rewrite_positions(conn, column_id, _active_card_ids(conn, column_id))
+                for planned_date in affected_planned_dates:
+                    _rewrite_planned_positions(conn, planned_date)
+                revision = bump_revision(conn)
+                conn.commit()
+                committed = True
+            except Exception:
+                conn.rollback()
+                for rollback in reversed(rollbacks):
+                    original = rollback.split(".permanent-delete-", 1)[0]
+                    if os.path.isdir(rollback) and not os.path.exists(original):
+                        os.replace(rollback, original)
+                raise
+            for rollback in rollbacks:
+                try:
+                    shutil.rmtree(rollback)
+                except OSError:
+                    MAINTENANCE_REPORT["cleanup"].append(rollback)
+            return {"ok": True, "count": len(items), "revision": revision}
+        except Exception as error:
+            if not committed:
+                for rollback in reversed(rollbacks):
+                    original = rollback.split(".permanent-delete-", 1)[0]
+                    try:
+                        if os.path.isdir(rollback) and not os.path.exists(original):
+                            os.replace(rollback, original)
+                    except OSError:
+                        pass
+            raise _file_in_use_error(error)
+
+
 SEARCH_SORTS = {
     "archived_desc": ("archived_at", "DESC"),
     "archived_asc": ("archived_at", "ASC"),
@@ -2089,6 +2235,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(list_cards(conn, int(raw) if raw is not None else None))
         if path == "/api/cards" and method == "POST": return self._send_json(create_card(conn, self._read_json_body()), 201)
         if path == "/api/cards/drafts" and method == "POST": return self._send_json(create_card_draft(conn, self._read_json_body()), 201)
+        if path == "/api/cards/batch/archive" and method == "POST": return self._send_json(batch_archive_cards(conn, self._read_json_body()))
+        if path == "/api/cards/batch/restore" and method == "POST": return self._send_json(batch_restore_cards(conn, self._read_json_body()))
+        if path == "/api/cards/batch/permanent-delete" and method == "POST": return self._send_json(batch_permanently_delete_cards(conn, self._read_json_body()))
         match = re.fullmatch(r"/api/cards/(\d+)", path)
         if match:
             cid = int(match.group(1))
@@ -2158,6 +2307,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/cards":
             return "GET, POST, OPTIONS"
         if path == "/api/cards/drafts":
+            return "POST, OPTIONS"
+        if path in ("/api/cards/batch/archive", "/api/cards/batch/restore", "/api/cards/batch/permanent-delete"):
             return "POST, OPTIONS"
         if re.fullmatch(r"/api/cards/\d+", path):
             return "GET, PUT, DELETE, OPTIONS"

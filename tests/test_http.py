@@ -359,6 +359,49 @@ class HttpApiTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertEqual(json.loads(body)["error"]["code"], code)
 
+    def test_batch_archive_restore_and_permanent_delete(self):
+        first_result = self.create_card("批量 A")
+        second_result = self.create_card("批量 B")
+        board = self.get_board()
+        items = [{"id": first_result["card"]["id"], "version": first_result["card"]["version"]},
+                 {"id": second_result["card"]["id"], "version": second_result["card"]["version"]}]
+        status, _, body = self.request("POST", "/api/cards/batch/archive", {"items": items, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["count"], 2)
+        board = self.get_board()
+        self.assertEqual([card for card in board["cards"]], [])
+        archived_items = []
+        for card_id in (first_result["card"]["id"], second_result["card"]["id"]):
+            status, _, body = self.request("GET", f"/api/cards/{card_id}")
+            self.assertEqual(status, 200)
+            archived_items.append({"id": card_id, "version": json.loads(body)["version"]})
+        status, _, body = self.request("POST", "/api/cards/batch/restore", {"items": archived_items, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["count"], 2)
+        board = self.get_board()
+        self.assertEqual(len(board["cards"]), 2)
+        # 批量永久删除
+        status, _, body = self.request("POST", "/api/cards/batch/permanent-delete", {"items": items, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"]["code"], "VERSION_CONFLICT")
+        restored_items = [{"id": card["id"], "version": card["version"]} for card in board["cards"]]
+        status, _, body = self.request("POST", "/api/cards/batch/permanent-delete", {"items": restored_items, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["count"], 2)
+        self.assertEqual(len(self.get_board()["cards"]), 0)
+
+    def test_batch_rejects_invalid_payloads(self):
+        board = self.get_board()
+        for payload, status_code, code in (
+            ({"items": [], "expected_board_revision": board["revision"]}, 422, "VALIDATION_ERROR"),
+            ({"items": [{"id": "abc", "version": 1}], "expected_board_revision": board["revision"]}, 422, "VALIDATION_ERROR"),
+            ({"items": [{"id": 1, "version": 1}], "expected_board_revision": board["revision"] + 1}, 409, "BOARD_REVISION_CONFLICT"),
+        ):
+            with self.subTest(code=code):
+                status, _, body = self.request("POST", "/api/cards/batch/archive", payload)
+                self.assertEqual(status, status_code)
+                self.assertEqual(json.loads(body)["error"]["code"], code)
+
     def test_plan_card_http_add_reorder_remove_and_board_snapshot(self):
         first_result = self.create_card("今日 A")
         second_result = self.create_card("今日 B")

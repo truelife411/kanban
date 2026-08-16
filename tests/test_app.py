@@ -778,5 +778,86 @@ class AttachmentTests(DatabaseTestCase):
         shutil.rmtree(extracted)
 
 
+class BatchOperationsTests(DatabaseTestCase):
+    def batch_items(self, *cards):
+        return [{"id": card["id"], "version": card["version"]} for card in cards]
+
+    def test_batch_archive_compacts_positions_and_bumps_revision_once(self):
+        column = app.list_columns(self.conn)[0]
+        first = self.create_card(column["id"], "A")
+        middle = self.create_card(column["id"], "B")
+        last = self.create_card(column["id"], "C")
+        revision = app.board_revision(self.conn)
+        result = app.batch_archive_cards(self.conn, {"items": self.batch_items(first, last), "expected_board_revision": revision})
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["revision"], revision + 1)
+        self.assertEqual([(card["id"], card["position"]) for card in app.list_cards(self.conn, column["id"])], [(middle["id"], 0)])
+        for card_id in (first["id"], last["id"]):
+            card = app.get_card(self.conn, card_id, include_draft=True)
+            self.assertEqual(card["archived"], 1)
+            self.assertEqual(card["archive_reason"], "manual")
+
+    def test_batch_restore_uses_original_or_fallback_column(self):
+        first_column = app.list_columns(self.conn)[0]
+        second_column = self.create_column("规划中")
+        card = self.create_card(first_column["id"], "归档卡")
+        self.archive_card(card["id"])
+        card = app.get_card(self.conn, card["id"], include_draft=True)
+        result = app.batch_restore_cards(self.conn, {"items": self.batch_items(card), "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(result["count"], 1)
+        restored = app.get_card(self.conn, card["id"], include_draft=True)
+        self.assertEqual(restored["archived"], 0)
+        self.assertEqual(restored["column_id"], first_column["id"])
+        # 原列已删除时回退到同名活跃列或第一个活跃列
+        card2 = self.create_card(first_column["id"], "归档卡2")
+        self.archive_card(card2["id"])
+        card2 = app.get_card(self.conn, card2["id"], include_draft=True)
+        app.delete_column(self.conn, first_column["id"], self.with_column_tokens(first_column["id"]))
+        app.batch_restore_cards(self.conn, {"items": self.batch_items(card2), "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(app.get_card(self.conn, card2["id"], include_draft=True)["column_id"], app.list_columns(self.conn)[0]["id"])
+
+    def test_batch_restore_to_specific_column(self):
+        first_column = app.list_columns(self.conn)[0]
+        second_column = self.create_column("目标列")
+        card = self.create_card(first_column["id"], "归档卡")
+        self.archive_card(card["id"])
+        card = app.get_card(self.conn, card["id"], include_draft=True)
+        app.batch_restore_cards(self.conn, {"items": self.batch_items(card), "target_column_id": second_column["id"], "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(app.get_card(self.conn, card["id"], include_draft=True)["column_id"], second_column["id"])
+
+    def test_batch_permanent_delete_removes_files_and_rolls_back_on_failure(self):
+        column = app.list_columns(self.conn)[0]
+        keep = self.create_card(column["id"], "保留")
+        doomed = self.create_card(column["id"], "删除")
+        app.save_attachment(self.conn, doomed["id"], "data.bin", "", io.BytesIO(b"data"), 4)
+        revision = app.board_revision(self.conn)
+        result = app.batch_permanently_delete_cards(self.conn, {"items": self.batch_items(doomed), "expected_board_revision": revision})
+        self.assertEqual(result["count"], 1)
+        self.assertFalse(os.path.exists(app.attachment_directory(doomed["id"])))
+        self.assertEqual([(card["id"], card["position"]) for card in app.list_cards(self.conn, column["id"])], [(keep["id"], 0)])
+        # 中途失败时整体回滚
+        doomed2 = self.create_card(column["id"], "删除2")
+        app.save_attachment(self.conn, doomed2["id"], "data.bin", "", io.BytesIO(b"data"), 4)
+        with self.assertRaises(app.ApiError):
+            app.batch_permanently_delete_cards(self.conn, {"items": self.batch_items(doomed2) + [{"id": 999999, "version": 1}], "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(app.get_card(self.conn, doomed2["id"])["title"], "删除2")
+        self.assertTrue(os.path.isfile(app.attachment_path(doomed2["id"], "data.bin")))
+
+    def test_batch_validation_and_version_conflicts(self):
+        column = app.list_columns(self.conn)[0]
+        card = self.create_card(column["id"], "冲突")
+        for payload, code in (
+            ({"items": [], "expected_board_revision": app.board_revision(self.conn)}, "VALIDATION_ERROR"),
+            ({"items": [{"id": card["id"], "version": 1}, {"id": card["id"], "version": 1}], "expected_board_revision": app.board_revision(self.conn)}, "VALIDATION_ERROR"),
+            ({"items": [{"id": card["id"]}], "expected_board_revision": app.board_revision(self.conn)}, "VALIDATION_ERROR"),
+            ({"items": [{"id": card["id"], "version": card["version"] + 1}], "expected_board_revision": app.board_revision(self.conn)}, "VERSION_CONFLICT"),
+            ({"items": [{"id": card["id"], "version": card["version"]}], "expected_board_revision": app.board_revision(self.conn) + 1}, "BOARD_REVISION_CONFLICT"),
+        ):
+            with self.subTest(code=code), self.assertRaises(app.ApiError) as raised:
+                app.batch_archive_cards(self.conn, payload)
+            self.assertEqual(raised.exception.code, code)
+        self.assertEqual(app.get_card(self.conn, card["id"])["archived"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

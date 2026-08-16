@@ -53,6 +53,17 @@ export function splitDue(value) {
 export function joinDue(date, time) { return date ? date + (time ? ` ${time}` : "") : ""; }
 export function dueDisplay(value) { return value.trim(); }
 
+export function dueCountdown(value, referenceDate = new Date()) {
+    const target = calendarDayNumber(value);
+    const today = calendarDayNumber(localDateKey(referenceDate));
+    if (target == null || today == null) return "";
+    const diff = target - today;
+    if (diff < 0) return `已逾期 ${-diff} 天`;
+    if (diff === 0) return "今天截止";
+    if (diff === 1) return "明天截止";
+    return `还剩 ${diff} 天`;
+}
+
 export function dueSortTimestamp(value) {
     const match = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2}))?$/.exec((value || "").trim());
     if (!match) return null;

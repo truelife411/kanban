@@ -28,7 +28,10 @@ export const state = {
     searchCursor: null,
     searchConditions: "",
     searchParams: "",
+    searchResults: new Map(),
     historySort: "archived_desc",
+    batchMode: false,
+    batchSelected: new Set(),
 };
 
 export function hasActiveFilters() {

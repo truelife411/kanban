@@ -35,11 +35,17 @@
             <div id="priority-filters" class="filter-group priority-filter-group" aria-label="优先级"></div>
             <div id="label-filters" class="filter-group label-filter-group" aria-label="标签"></div>
             <button id="clear-filters" class="filter-clear" type="button" hidden>清除筛选</button>
+            <button id="board-batch-toggle" class="filter-clear" type="button" title="进入批量选择模式，可多选卡片后批量归档">批量选择</button>
         </div>
         <div id="filter-summary" class="filter-summary" role="status" hidden></div>
         <div id="filter-reorder-hint" class="filter-reorder-hint" role="status" hidden>筛选状态下暂不支持卡片和列手动排序</div>
         <div id="board" class="board" aria-label="看板">
             <!-- 列由 JS 渲染 -->
+        </div>
+        <div id="board-batch-bar" class="batch-bar board-batch-bar" role="status" hidden>
+            <span id="board-batch-count"></span>
+            <button id="board-batch-archive" type="button" class="primary">归档所选</button>
+            <button id="board-batch-exit" type="button" class="ghost">退出选择</button>
         </div>
     </main>
 
@@ -156,6 +162,13 @@
             </button>
         </div>
         <div class="search-meta" id="search-meta"></div>
+        <div id="history-batch-bar" class="batch-bar history-batch-bar" role="status" hidden>
+            <span id="history-batch-count"></span>
+            <button id="history-batch-select-page" type="button" class="ghost">全选本页</button>
+            <button id="history-batch-restore" type="button" class="primary">恢复所选</button>
+            <button id="history-batch-delete" type="button" class="ghost danger-text">删除所选</button>
+            <button id="history-batch-clear" type="button" class="ghost">清除选择</button>
+        </div>
         <div id="search-results" class="search-results"></div>
     </main>
 
