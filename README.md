@@ -4,7 +4,7 @@
 
 ## 环境要求
 
-- Python 3.10 或更高版本（项目使用标准库实现，并通过项目测试命令持续验证当前受支持版本）
+- Python 3.7 或更高版本（项目使用标准库实现；语法与运行时 API 已通过 `vermin` 按 3.7 目标验证，并在 3.12 上持续跑通全部测试）
 - 支持 ES Modules 的现代浏览器
 - 不需要安装第三方 Python 包
 
@@ -18,6 +18,12 @@
 python kanban.py
 ```
 
+Linux / macOS 使用 `python3 kanban.py`；指定端口时：
+
+```bash
+KANBAN_PORT=8080 python3 kanban.py
+```
+
 然后访问：
 
 ```text
@@ -25,6 +31,27 @@ http://127.0.0.1:8000
 ```
 
 服务强制仅监听 `127.0.0.1`，不能通过环境变量改为局域网或公网地址。可按 `Ctrl+C` 停止服务。
+
+### Linux 部署提示
+
+- 服务进程需要对项目目录（数据库、`attachments/`、`backups/`）有读写权限。
+- “今日中心”按运行设备的本地日期分组：请确认服务器时区与你的使用时区一致（如 `TZ=Asia/Shanghai`），否则“今天/逾期”分组会按服务器时区计算。
+- 长期运行建议用 systemd 托管，示例：
+
+```ini
+[Unit]
+Description=Kanban
+After=network.target
+
+[Service]
+WorkingDirectory=/path/to/kanban
+Environment=KANBAN_PORT=8000
+ExecStart=/usr/bin/python3 kanban.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
 
 ## 今日中心
 
