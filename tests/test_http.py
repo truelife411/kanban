@@ -11,6 +11,7 @@ from http.server import ThreadingHTTPServer
 from unittest import mock
 from urllib.parse import quote
 
+import config
 import kanban as app
 
 
@@ -21,9 +22,9 @@ class HttpApiTests(unittest.TestCase):
         self.backup_dir = os.path.join(self.temp.name, "backups")
         self.attachments_dir = os.path.join(self.temp.name, "attachments")
         self.patches = [
-            mock.patch.object(app, "DB_PATH", self.db_path),
-            mock.patch.object(app, "BACKUP_DIR", self.backup_dir),
-            mock.patch.object(app, "ATTACHMENTS_DIR", self.attachments_dir),
+            mock.patch.object(config, "DB_PATH", self.db_path),
+            mock.patch.object(config, "BACKUP_DIR", self.backup_dir),
+            mock.patch.object(config, "ATTACHMENTS_DIR", self.attachments_dir),
         ]
         for patch in self.patches:
             patch.start()
@@ -133,7 +134,7 @@ class HttpApiTests(unittest.TestCase):
         status, headers, body = self.request("GET", "/api/board")
         data = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(data["schema_version"], 5)
+        self.assertEqual(data["schema_version"], 6)
         self.assertEqual(len(data["columns"]), 3)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 
@@ -359,6 +360,143 @@ class HttpApiTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertEqual(json.loads(body)["error"]["code"], code)
 
+    def test_archived_card_http_edit_and_attachment(self):
+        result = self.create_card("归档编辑")
+        card = result["card"]
+        status, _, body = self.request("DELETE", f"/api/cards/{card['id']}", {
+            "expected_version": card["version"], "expected_board_revision": result["revision"],
+        })
+        self.assertEqual(status, 200)
+        archive_response = json.loads(body)
+        # 归档后编辑内容字段
+        status, _, body = self.request("PUT", f"/api/cards/{card['id']}", {
+            "column_id": card["column_id"], "title": "归档后新标题", "description": "", "labels": "",
+            "due_date": "", "planned_date": "", "priority": "low",
+            "expected_version": archive_response["version"], "expected_board_revision": archive_response["revision"],
+        })
+        self.assertEqual(status, 200)
+        updated = json.loads(body)
+        self.assertEqual(updated["card"]["title"], "归档后新标题")
+        self.assertEqual(updated["card"]["archived"], 1)
+        # 归档后上传与删除附件
+        status, _, body = self.upload(card["id"], "after.txt", b"after")
+        self.assertEqual(status, 201)
+        attachment = json.loads(body)
+        status, _, body = self.raw_request("DELETE", f"/api/attachments/{attachment['id']}", b"", {"X-Attachment-Version": str(attachment["version"])})
+        self.assertEqual(status, 200)
+
+    def test_batch_archive_restore_and_permanent_delete(self):
+        first_result = self.create_card("批量 A")
+        second_result = self.create_card("批量 B")
+        board = self.get_board()
+        items = [{"id": first_result["card"]["id"], "version": first_result["card"]["version"]},
+                 {"id": second_result["card"]["id"], "version": second_result["card"]["version"]}]
+        status, _, body = self.request("POST", "/api/cards/batch/archive", {"items": items, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["count"], 2)
+        board = self.get_board()
+        self.assertEqual([card for card in board["cards"]], [])
+        archived_items = []
+        for card_id in (first_result["card"]["id"], second_result["card"]["id"]):
+            status, _, body = self.request("GET", f"/api/cards/{card_id}")
+            self.assertEqual(status, 200)
+            archived_items.append({"id": card_id, "version": json.loads(body)["version"]})
+        status, _, body = self.request("POST", "/api/cards/batch/restore", {"items": archived_items, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["count"], 2)
+        board = self.get_board()
+        self.assertEqual(len(board["cards"]), 2)
+        # 批量永久删除
+        status, _, body = self.request("POST", "/api/cards/batch/permanent-delete", {"items": items, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"]["code"], "VERSION_CONFLICT")
+        restored_items = [{"id": card["id"], "version": card["version"]} for card in board["cards"]]
+        status, _, body = self.request("POST", "/api/cards/batch/permanent-delete", {"items": restored_items, "expected_board_revision": board["revision"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["count"], 2)
+        self.assertEqual(len(self.get_board()["cards"]), 0)
+
+    def test_batch_rejects_invalid_payloads(self):
+        board = self.get_board()
+        for payload, status_code, code in (
+            ({"items": [], "expected_board_revision": board["revision"]}, 422, "VALIDATION_ERROR"),
+            ({"items": [{"id": "abc", "version": 1}], "expected_board_revision": board["revision"]}, 422, "VALIDATION_ERROR"),
+            ({"items": [{"id": 1, "version": 1}], "expected_board_revision": board["revision"] + 1}, 409, "BOARD_REVISION_CONFLICT"),
+        ):
+            with self.subTest(code=code):
+                status, _, body = self.request("POST", "/api/cards/batch/archive", payload)
+                self.assertEqual(status, status_code)
+                self.assertEqual(json.loads(body)["error"]["code"], code)
+
+    def test_plan_card_http_add_reorder_remove_and_board_snapshot(self):
+        first_result = self.create_card("今日 A")
+        second_result = self.create_card("今日 B")
+        first, second = first_result["card"], second_result["card"]
+        board = self.get_board()
+
+        status, _, body = self.request("PUT", f"/api/cards/{first['id']}/plan", {
+            "planned_date": "2026-07-26",
+            "expected_version": first["version"],
+            "expected_board_revision": board["revision"],
+        })
+        self.assertEqual(status, 200)
+        first_planned = json.loads(body)
+        self.assertEqual(first_planned["card"]["planned_date"], "2026-07-26")
+        self.assertEqual(first_planned["card"]["planned_position"], 0)
+
+        status, _, body = self.request("PUT", f"/api/cards/{second['id']}/plan", {
+            "planned_date": "2026-07-26",
+            "position": 0,
+            "expected_version": second["version"],
+            "expected_board_revision": first_planned["revision"],
+        })
+        self.assertEqual(status, 200)
+        second_planned = json.loads(body)
+        board = self.get_board()
+        planned = sorted(
+            (card for card in board["cards"] if card["planned_date"] == "2026-07-26"),
+            key=lambda card: card["planned_position"],
+        )
+        self.assertEqual(
+            [(card["title"], card["planned_position"]) for card in planned],
+            [("今日 B", 0), ("今日 A", 1)],
+        )
+
+        current_first = next(card for card in board["cards"] if card["id"] == first["id"])
+        status, _, body = self.request("PUT", f"/api/cards/{first['id']}/plan", {
+            "planned_date": "",
+            "expected_version": current_first["version"],
+            "expected_board_revision": second_planned["revision"],
+        })
+        self.assertEqual(status, 200)
+        removed = json.loads(body)["card"]
+        self.assertEqual(removed["planned_date"], "")
+        self.assertIsNone(removed["planned_position"])
+
+    def test_create_card_with_planned_date_supports_today_quick_add(self):
+        board = self.get_board()
+        payload = self.card_payload(board, "快速今日")
+        payload["due_date"] = "2026-07-26"
+        payload["planned_date"] = "2026-07-26"
+        status, _, body = self.request("POST", "/api/cards", payload)
+        self.assertEqual(status, 201)
+        card = json.loads(body)["card"]
+        self.assertEqual(card["due_date"], "2026-07-26")
+        self.assertEqual(card["planned_date"], "2026-07-26")
+        self.assertEqual(card["planned_position"], 0)
+
+    def test_plan_card_http_rejects_stale_version(self):
+        created = self.create_card("冲突今日")
+        card = created["card"]
+        board = self.get_board()
+        status, _, body = self.request("PUT", f"/api/cards/{card['id']}/plan", {
+            "planned_date": "2026-07-26",
+            "expected_version": card["version"] + 1,
+            "expected_board_revision": board["revision"],
+        })
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["error"]["code"], "VERSION_CONFLICT")
+
     def test_static_assets_require_revalidation(self):
         for path in (
             "/", "/index.html", "/static/style.css", "/static/theme-init.js",
@@ -381,6 +519,11 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn("default-src 'self'", csp)
         self.assertIn("script-src 'self'", csp)
         self.assertNotIn("script-src 'self' 'unsafe-inline'", csp)
+
+        status, headers, body = self.raw_request("OPTIONS", "/api/cards/1/plan")
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        self.assertEqual(headers["Allow"], "PUT, OPTIONS")
 
         status, headers, body = self.raw_request("OPTIONS", "/api/cards/1/permanent")
         self.assertEqual(status, 204)

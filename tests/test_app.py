@@ -9,6 +9,10 @@ import zipfile
 from datetime import datetime
 from unittest import mock
 
+import backup
+import board
+import config
+import db
 import kanban as app
 
 
@@ -19,9 +23,9 @@ class DatabaseTestCase(unittest.TestCase):
         self.backup_dir = os.path.join(self.temp.name, "backups")
         self.attachments_dir = os.path.join(self.temp.name, "attachments")
         self.patches = [
-            mock.patch.object(app, "DB_PATH", self.db_path),
-            mock.patch.object(app, "BACKUP_DIR", self.backup_dir),
-            mock.patch.object(app, "ATTACHMENTS_DIR", self.attachments_dir),
+            mock.patch.object(config, "DB_PATH", self.db_path),
+            mock.patch.object(config, "BACKUP_DIR", self.backup_dir),
+            mock.patch.object(config, "ATTACHMENTS_DIR", self.attachments_dir),
         ]
         for patch in self.patches:
             patch.start()
@@ -52,15 +56,17 @@ class DatabaseTestCase(unittest.TestCase):
             "expected_board_revision": app.board_revision(self.conn),
         }
 
-    def create_card(self, column_id, title):
-        return app.create_card(self.conn, self.with_revision({
+    def create_card(self, column_id, title, **overrides):
+        payload = {
             "column_id": column_id,
             "title": title,
             "description": "",
             "labels": "",
             "due_date": "",
             "priority": "medium",
-        }))["card"]
+        }
+        payload.update(overrides)
+        return app.create_card(self.conn, self.with_revision(payload))["card"]
 
     def create_column(self, name):
         return app.create_column(self.conn, self.with_revision({"name": name}))["column"]
@@ -92,9 +98,14 @@ class ServerConfigurationTests(unittest.TestCase):
 
 class MigrationTests(DatabaseTestCase):
     def test_latest_schema_is_created(self):
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(len(app.list_columns(self.conn)), 3)
-        self.assertEqual(app.get_board(self.conn)["schema_version"], 5)
+        self.assertEqual(app.get_board(self.conn)["schema_version"], 6)
+        columns = {row["name"]: row for row in self.conn.execute("PRAGMA table_info(cards)")}
+        self.assertIn("planned_date", columns)
+        self.assertIn("planned_position", columns)
+        indexes = {row["name"] for row in self.conn.execute("PRAGMA index_list(cards)")}
+        self.assertIn("idx_cards_planned_date_position", indexes)
 
     def test_version_five_migration_normalizes_existing_descriptions_and_creates_backup(self):
         column = app.list_columns(self.conn)[0]
@@ -105,7 +116,7 @@ class MigrationTests(DatabaseTestCase):
         self.conn.close()
         app.init_db()
         self.conn = app.get_conn()
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(app.get_card(self.conn, card["id"])["description"], '<p><span class="rt-fg-red">甲乙</span></p>')
         self.assertTrue(any(name.startswith("kanban-pre-migration-") for name in os.listdir(self.backup_dir)))
 
@@ -242,6 +253,85 @@ class CardMovementTests(DatabaseTestCase):
         self.assertEqual(raised.exception.code, "LAST_ACTIVE_COLUMN")
 
 
+class TodayPlanningTests(DatabaseTestCase):
+    DATE = "2026-07-26"
+
+    def planned_cards(self, planned_date=DATE):
+        return self.conn.execute(
+            "SELECT * FROM cards WHERE planned_date=? AND archived=0 AND is_draft=0 "
+            "ORDER BY planned_position,id",
+            (planned_date,),
+        ).fetchall()
+
+    def test_plan_card_add_reorder_and_remove_keeps_positions_contiguous(self):
+        column = app.list_columns(self.conn)[0]
+        cards = [self.create_card(column["id"], title) for title in ("A", "B", "C")]
+        for card in cards:
+            app.plan_card(self.conn, card["id"], self.with_card_tokens(card["id"], {
+                "planned_date": self.DATE,
+            }))
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("A", 0), ("B", 1), ("C", 2)],
+        )
+
+        app.plan_card(self.conn, cards[2]["id"], self.with_card_tokens(cards[2]["id"], {
+            "planned_date": self.DATE,
+            "position": 0,
+        }))
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("C", 0), ("A", 1), ("B", 2)],
+        )
+
+        app.plan_card(self.conn, cards[0]["id"], self.with_card_tokens(cards[0]["id"], {
+            "planned_date": "",
+        }))
+        removed = app.get_card(self.conn, cards[0]["id"])
+        self.assertEqual(removed["planned_date"], "")
+        self.assertIsNone(removed["planned_position"])
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("C", 0), ("B", 1)],
+        )
+
+    def test_plan_card_moves_between_dates_and_compacts_both_lists(self):
+        column = app.list_columns(self.conn)[0]
+        a = self.create_card(column["id"], "A", planned_date=self.DATE)
+        b = self.create_card(column["id"], "B", planned_date=self.DATE)
+        other_date = "2026-07-27"
+        c = self.create_card(column["id"], "C", planned_date=other_date)
+        app.plan_card(self.conn, a["id"], self.with_card_tokens(a["id"], {
+            "planned_date": other_date,
+            "position": 0,
+        }))
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("B", 0)],
+        )
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards(other_date)],
+            [("A", 0), ("C", 1)],
+        )
+
+    def test_import_export_preserves_planned_date_and_normalizes_position(self):
+        column = app.list_columns(self.conn)[0]
+        self.create_card(column["id"], "A", planned_date=self.DATE)
+        self.create_card(column["id"], "B", planned_date=self.DATE)
+        exported = app.export_data(self.conn)
+        planned = [card for card in exported["cards"] if card["planned_date"] == self.DATE]
+        self.assertEqual([card["planned_position"] for card in planned], [0, 1])
+        result = app.import_replace(self.conn, {
+            "data": exported,
+            "expected_board_revision": app.board_revision(self.conn),
+        })
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [(row["title"], row["planned_position"]) for row in self.planned_cards()],
+            [("A", 0), ("B", 1)],
+        )
+
+
 class ValidationTests(DatabaseTestCase):
     def test_invalid_priority_is_rejected(self):
         column = app.list_columns(self.conn)[0]
@@ -272,10 +362,16 @@ class ValidationTests(DatabaseTestCase):
             "<p><strong>摘要</strong></p><ul><li><em>一级</em><ol><li><u>二级</u></li></ol></li></ul>",
         )
 
+    def test_description_normalizes_cross_browser_inline_tags(self):
+        self.assertEqual(
+            app.sanitize_description("<div><b>粗体</b><i>斜体</i><strike>删除</strike></div>"),
+            "<p><strong>粗体</strong><em>斜体</em><s>删除</s></p>",
+        )
+
     def test_description_sanitization_removes_xss_and_is_idempotent(self):
         source = '<div class="bad" onclick="x">安全<img src=x onerror=x><script><b>危险</b></script><i style="x">格式</i></div>'
         sanitized = app.sanitize_description(source)
-        self.assertEqual(sanitized, "<p>安全<i>格式</i></p>")
+        self.assertEqual(sanitized, "<p>安全<em>格式</em></p>")
         self.assertEqual(app.sanitize_description(sanitized), sanitized)
 
     def test_description_color_classes_are_allowlisted_and_canonical(self):
@@ -429,7 +525,7 @@ class BackupImportTests(DatabaseTestCase):
             if path.endswith(old_name):
                 raise OSError("locked")
             return real_remove(path)
-        with mock.patch.object(app.os, "remove", side_effect=fail_old), mock.patch.object(app.sys, "stderr", new=io.StringIO()) as stderr:
+        with mock.patch.object(db.os, "remove", side_effect=fail_old), mock.patch.object(db.sys, "stderr", new=io.StringIO()) as stderr:
             path = app.create_backup("test")
         self.assertTrue(os.path.isfile(path))
         self.assertIn("数据库备份清理失败", stderr.getvalue())
@@ -472,6 +568,31 @@ class BackupImportTests(DatabaseTestCase):
         after = set(os.listdir(self.backup_dir)) if os.path.isdir(self.backup_dir) else set()
         self.assertEqual(after, before)
         self.assertFalse(any(name.endswith(".zip") or name.startswith(".kanban-full-") for name in after - before))
+
+    def test_json_import_rejects_invalid_board_state(self):
+        column = app.list_columns(self.conn)[0]
+        self.create_card(column["id"], "脏数据")
+        exported = app.export_data(self.conn)
+        cases = []
+        bad = json.loads(json.dumps(exported, ensure_ascii=False))
+        bad["cards"][0]["created_at"] = "not-a-date"
+        cases.append((bad, "INVALID_BOARD_TIMESTAMP"))
+        bad = json.loads(json.dumps(exported, ensure_ascii=False))
+        bad["cards"][0]["archived"] = 1
+        cases.append((bad, "INVALID_ARCHIVE_STATE"))
+        bad = json.loads(json.dumps(exported, ensure_ascii=False))
+        bad["cards"][0]["created_at"], bad["cards"][0]["updated_at"] = "2026-01-02 00:00:00", "2026-01-01 00:00:00"
+        cases.append((bad, "INVALID_BOARD_TIMESTAMP"))
+        bad = json.loads(json.dumps(exported, ensure_ascii=False))
+        bad["cards"][0]["archived"] = 1
+        bad["cards"][0]["archived_at"] = bad["cards"][0]["created_at"]
+        cases.append((bad, "INVALID_ARCHIVE_STATE"))
+        for payload, code in cases:
+            with self.subTest(code=code), self.assertRaises(app.ApiError) as raised:
+                app.import_replace(self.conn, {"data": payload, "expected_board_revision": app.board_revision(self.conn)})
+            self.assertEqual(raised.exception.code, code)
+        # 导入全部失败后原数据保持完整
+        self.assertEqual([card["title"] for card in app.list_cards(self.conn)], ["脏数据"])
 
 
     def test_search_cursor_paginates_without_duplicates(self):
@@ -571,7 +692,7 @@ class PermanentDeleteTests(DatabaseTestCase):
     def test_transaction_failure_restores_attachment_directory(self):
         card = self.create_card(app.list_columns(self.conn)[0]["id"], "回滚")
         app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"data"), 4)
-        with mock.patch.object(app, "bump_revision", side_effect=sqlite3.OperationalError("forced")):
+        with mock.patch.object(board, "bump_revision", side_effect=sqlite3.OperationalError("forced")):
             with self.assertRaises(sqlite3.OperationalError):
                 app.permanently_delete_card(self.conn, card["id"], self.with_card_tokens(card["id"]))
         self.assertTrue(os.path.isfile(app.attachment_path(card["id"], "data.bin")))
@@ -585,7 +706,7 @@ class PermanentDeleteTests(DatabaseTestCase):
             if ".permanent-delete-" in path:
                 raise PermissionError("locked")
             return real_rmtree(path, *args, **kwargs)
-        with mock.patch.object(app.shutil, "rmtree", side_effect=fail_rollback):
+        with mock.patch.object(board.shutil, "rmtree", side_effect=fail_rollback):
             app.permanently_delete_card(self.conn, card["id"], self.with_card_tokens(card["id"]))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM cards WHERE id=?", (card["id"],)).fetchone()[0], 0)
         self.assertTrue(any(".permanent-delete-" in path for path in app.MAINTENANCE_REPORT["cleanup"]))
@@ -633,12 +754,12 @@ class AttachmentTests(DatabaseTestCase):
             self.assertEqual(handle.read(), b"new-data")
         self.archive_card(card["id"])
         self.assertEqual(app.search_cards(self.conn, q="REPORT")[0]["id"], card["id"])
-        with self.assertRaises(app.ApiError):
-            app.delete_attachment(self.conn, replaced["id"], replaced["version"])
-        restored = self.restore_card(card["id"])["card"]
-        self.assertEqual(restored["attachment_count"], 1)
+        # 归档卡片现在允许管理附件(编辑描述/替换附件场景)
         app.delete_attachment(self.conn, replaced["id"], replaced["version"])
-        self.assertEqual(app.get_card(self.conn, card["id"])["attachment_count"], 0)
+        restored = self.restore_card(card["id"])["card"]
+        self.assertEqual(restored["attachment_count"], 0)
+        app.save_attachment(self.conn, restored["id"], "data.bin", "", io.BytesIO(b"x"), 1)
+        self.assertEqual(app.get_card(self.conn, card["id"])["attachment_count"], 1)
 
     def test_post_commit_attachment_cleanup_failure_keeps_new_file(self):
         card = self.create_card(app.list_columns(self.conn)[0]["id"], "清理失败")
@@ -648,7 +769,7 @@ class AttachmentTests(DatabaseTestCase):
             if ".rollback-" in path:
                 raise PermissionError("locked")
             return real_remove(path)
-        with mock.patch("kanban.os.remove", side_effect=fail_rollback):
+        with mock.patch("attachments.os.remove", side_effect=fail_rollback):
             replaced = app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"new"), 3, True, original["version"])
         self.assertEqual(replaced["version"], 2)
         with open(app.attachment_path(card["id"], "data.bin"), "rb") as handle:
@@ -662,10 +783,44 @@ class AttachmentTests(DatabaseTestCase):
             if ".deleting-" in path:
                 raise PermissionError("locked")
             return real_remove(path)
-        with mock.patch("kanban.os.remove", side_effect=fail_trash):
+        with mock.patch("attachments.os.remove", side_effect=fail_trash):
             app.delete_attachment(self.conn, attachment["id"], attachment["version"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM attachments WHERE id=?", (attachment["id"],)).fetchone()[0], 0)
         self.assertFalse(os.path.exists(app.attachment_path(card["id"], "data.bin")))
+
+    def test_archived_card_edit_updates_fields_and_manages_attachments(self):
+        column = app.list_columns(self.conn)[0]
+        card = self.create_card(column["id"], "归档编辑")
+        app.save_attachment(self.conn, card["id"], "old.txt", "text/plain", io.BytesIO(b"old"), 3)
+        self.archive_card(card["id"])
+        archived = app.get_card(self.conn, card["id"], include_draft=True)
+        self.assertEqual(archived["archived"], 1)
+        revision = app.board_revision(self.conn)
+        payload = {
+            "column_id": column["id"], "title": "归档编辑后", "description": "<p>新描述</p>", "labels": "归档, 编辑",
+            "due_date": "2026-12-31", "planned_date": archived["planned_date"], "priority": "high",
+            "expected_version": archived["version"], "expected_board_revision": revision,
+        }
+        result = app.update_card(self.conn, card["id"], payload)
+        self.assertEqual(result["card"]["title"], "归档编辑后")
+        self.assertEqual(result["card"]["description"], "<p>新描述</p>")
+        self.assertEqual(result["card"]["archived"], 1)
+        self.assertEqual(result["card"]["column_id"], column["id"])
+        self.assertEqual(result["revision"], revision + 1)
+        with self.assertRaises(app.ApiError) as raised:
+            app.update_card(self.conn, card["id"], {**payload, "expected_version": archived["version"]})
+        self.assertEqual(raised.exception.code, "VERSION_CONFLICT")
+        # 归档卡片可上传、覆盖、删除附件
+        uploaded = app.save_attachment(self.conn, card["id"], "new.txt", "text/plain", io.BytesIO(b"new"), 3)
+        self.assertEqual(app.get_card(self.conn, card["id"], include_draft=True)["attachment_count"], 2)
+        replaced = app.save_attachment(self.conn, card["id"], "new.txt", "text/plain", io.BytesIO(b"v2"), 2, True, uploaded["version"])
+        self.assertEqual(replaced["version"], 2)
+        app.delete_attachment(self.conn, replaced["id"], replaced["version"])
+        self.assertEqual(app.get_card(self.conn, card["id"], include_draft=True)["attachment_count"], 1)
+        # 恢复后编辑内容保持
+        restored = self.restore_card(card["id"])["card"]
+        self.assertEqual(restored["title"], "归档编辑后")
+        self.assertEqual(restored["attachment_count"], 1)
 
     def test_json_export_metadata_and_full_backup(self):
         card = self.create_card(app.list_columns(self.conn)[0]["id"], "备份")
@@ -684,6 +839,87 @@ class AttachmentTests(DatabaseTestCase):
         self.assertEqual(preview["attachments"], 1)
         import shutil
         shutil.rmtree(extracted)
+
+
+class BatchOperationsTests(DatabaseTestCase):
+    def batch_items(self, *cards):
+        return [{"id": card["id"], "version": card["version"]} for card in cards]
+
+    def test_batch_archive_compacts_positions_and_bumps_revision_once(self):
+        column = app.list_columns(self.conn)[0]
+        first = self.create_card(column["id"], "A")
+        middle = self.create_card(column["id"], "B")
+        last = self.create_card(column["id"], "C")
+        revision = app.board_revision(self.conn)
+        result = app.batch_archive_cards(self.conn, {"items": self.batch_items(first, last), "expected_board_revision": revision})
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["revision"], revision + 1)
+        self.assertEqual([(card["id"], card["position"]) for card in app.list_cards(self.conn, column["id"])], [(middle["id"], 0)])
+        for card_id in (first["id"], last["id"]):
+            card = app.get_card(self.conn, card_id, include_draft=True)
+            self.assertEqual(card["archived"], 1)
+            self.assertEqual(card["archive_reason"], "manual")
+
+    def test_batch_restore_uses_original_or_fallback_column(self):
+        first_column = app.list_columns(self.conn)[0]
+        second_column = self.create_column("规划中")
+        card = self.create_card(first_column["id"], "归档卡")
+        self.archive_card(card["id"])
+        card = app.get_card(self.conn, card["id"], include_draft=True)
+        result = app.batch_restore_cards(self.conn, {"items": self.batch_items(card), "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(result["count"], 1)
+        restored = app.get_card(self.conn, card["id"], include_draft=True)
+        self.assertEqual(restored["archived"], 0)
+        self.assertEqual(restored["column_id"], first_column["id"])
+        # 原列已删除时回退到同名活跃列或第一个活跃列
+        card2 = self.create_card(first_column["id"], "归档卡2")
+        self.archive_card(card2["id"])
+        card2 = app.get_card(self.conn, card2["id"], include_draft=True)
+        app.delete_column(self.conn, first_column["id"], self.with_column_tokens(first_column["id"]))
+        app.batch_restore_cards(self.conn, {"items": self.batch_items(card2), "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(app.get_card(self.conn, card2["id"], include_draft=True)["column_id"], app.list_columns(self.conn)[0]["id"])
+
+    def test_batch_restore_to_specific_column(self):
+        first_column = app.list_columns(self.conn)[0]
+        second_column = self.create_column("目标列")
+        card = self.create_card(first_column["id"], "归档卡")
+        self.archive_card(card["id"])
+        card = app.get_card(self.conn, card["id"], include_draft=True)
+        app.batch_restore_cards(self.conn, {"items": self.batch_items(card), "target_column_id": second_column["id"], "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(app.get_card(self.conn, card["id"], include_draft=True)["column_id"], second_column["id"])
+
+    def test_batch_permanent_delete_removes_files_and_rolls_back_on_failure(self):
+        column = app.list_columns(self.conn)[0]
+        keep = self.create_card(column["id"], "保留")
+        doomed = self.create_card(column["id"], "删除")
+        app.save_attachment(self.conn, doomed["id"], "data.bin", "", io.BytesIO(b"data"), 4)
+        revision = app.board_revision(self.conn)
+        result = app.batch_permanently_delete_cards(self.conn, {"items": self.batch_items(doomed), "expected_board_revision": revision})
+        self.assertEqual(result["count"], 1)
+        self.assertFalse(os.path.exists(app.attachment_directory(doomed["id"])))
+        self.assertEqual([(card["id"], card["position"]) for card in app.list_cards(self.conn, column["id"])], [(keep["id"], 0)])
+        # 中途失败时整体回滚
+        doomed2 = self.create_card(column["id"], "删除2")
+        app.save_attachment(self.conn, doomed2["id"], "data.bin", "", io.BytesIO(b"data"), 4)
+        with self.assertRaises(app.ApiError):
+            app.batch_permanently_delete_cards(self.conn, {"items": self.batch_items(doomed2) + [{"id": 999999, "version": 1}], "expected_board_revision": app.board_revision(self.conn)})
+        self.assertEqual(app.get_card(self.conn, doomed2["id"])["title"], "删除2")
+        self.assertTrue(os.path.isfile(app.attachment_path(doomed2["id"], "data.bin")))
+
+    def test_batch_validation_and_version_conflicts(self):
+        column = app.list_columns(self.conn)[0]
+        card = self.create_card(column["id"], "冲突")
+        for payload, code in (
+            ({"items": [], "expected_board_revision": app.board_revision(self.conn)}, "VALIDATION_ERROR"),
+            ({"items": [{"id": card["id"], "version": 1}, {"id": card["id"], "version": 1}], "expected_board_revision": app.board_revision(self.conn)}, "VALIDATION_ERROR"),
+            ({"items": [{"id": card["id"]}], "expected_board_revision": app.board_revision(self.conn)}, "VALIDATION_ERROR"),
+            ({"items": [{"id": card["id"], "version": card["version"] + 1}], "expected_board_revision": app.board_revision(self.conn)}, "VERSION_CONFLICT"),
+            ({"items": [{"id": card["id"], "version": card["version"]}], "expected_board_revision": app.board_revision(self.conn) + 1}, "BOARD_REVISION_CONFLICT"),
+        ):
+            with self.subTest(code=code), self.assertRaises(app.ApiError) as raised:
+                app.batch_archive_cards(self.conn, payload)
+            self.assertEqual(raised.exception.code, code)
+        self.assertEqual(app.get_card(self.conn, card["id"])["archived"], 0)
 
 
 if __name__ == "__main__":

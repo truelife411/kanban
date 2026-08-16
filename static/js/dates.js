@@ -2,8 +2,23 @@ export function localDateKey(date = new Date()) {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+export function addLocalDays(value, days) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+    if (!match) return "";
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    if (localDateKey(date) !== value) return "";
+    date.setDate(date.getDate() + days);
+    return localDateKey(date);
+}
+
+export function timestampLocalDateKey(value) {
+    const date = parseLocalTimestamp(value);
+    return date ? localDateKey(date) : "";
+}
+
 export function dueDatePart(value) { return (value || "").trim().slice(0, 10); }
 export function isToday(card) { return dueDatePart(card.due_date) === localDateKey(); }
+export function isTomorrow(card) { const t=new Date(); t.setDate(t.getDate()+1); return dueDatePart(card.due_date) === localDateKey(t); }
 
 export function isOverdue(card, referenceDate) {
     const now = referenceDate instanceof Date ? referenceDate : new Date();
@@ -38,6 +53,17 @@ export function splitDue(value) {
 export function joinDue(date, time) { return date ? date + (time ? ` ${time}` : "") : ""; }
 export function dueDisplay(value) { return value.trim(); }
 
+export function dueCountdown(value, referenceDate = new Date()) {
+    const target = calendarDayNumber(value);
+    const today = calendarDayNumber(localDateKey(referenceDate));
+    if (target == null || today == null) return "";
+    const diff = target - today;
+    if (diff < 0) return `已逾期 ${-diff} 天`;
+    if (diff === 0) return "今天截止";
+    if (diff === 1) return "明天截止";
+    return `还剩 ${diff} 天`;
+}
+
 export function dueSortTimestamp(value) {
     const match = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2}))?$/.exec((value || "").trim());
     if (!match) return null;
@@ -68,17 +94,6 @@ export function compactCreatedTime(value, referenceDate = new Date()) {
     if (!date) return "未知";
     if (date.getFullYear() === referenceDate.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`;
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-export function relativeTimestamp(value, referenceDate = new Date()) {
-    const date = parseLocalTimestamp(value);
-    if (!date) return "未知";
-    const seconds = Math.max(0, Math.floor((referenceDate.getTime() - date.getTime()) / 1000));
-    if (seconds < 60) return "刚刚";
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`;
-    if (seconds < 604800) return `${Math.floor(seconds / 86400)}天前`;
-    return compactCreatedTime(value, referenceDate);
 }
 
 let pickerState = null;

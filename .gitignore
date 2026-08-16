@@ -18,3 +18,9 @@ venv/
 Thumbs.db
 .idea/
 .vscode/
+
+# 个人工具目录
+.workbuddy/
+.zcode/
+.claude/
+.pytest_cache/

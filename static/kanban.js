@@ -1,159 +1,2735 @@
-import { state, hasActiveFilters, isManualReorderDisabled } from "./js/state.js";
-import { api, versionPayload as makeVersionPayload } from "./js/api.js";
-import { toast, announce, formatBytes, setBusy, clearChildren, openModal as showModal, hideModal as dismissModal, chooseAction, setupButtonTooltips } from "./js/ui.js";
-import { localDateKey, dueDatePart, isToday, isOverdue, calendarDayNumber, dueClass, splitDue, joinDue, dueDisplay, dueSortTimestamp, parseLocalTimestamp, fullTimestamp, compactCreatedTime, openDateTimePicker, syncCardDateControl, syncCardTimeControl, clearCardDate, clearCardTime, syncHistoryDateControl, clearHistoryDate } from "./js/dates.js";
-
-let drag={cardId:null,sourceColId:null},colDrag={colId:null,colEl:null},openSortColumnId=null,historySortOpen=false,autoArchiveTooltipTimer=null,autoArchiveTooltip=null,currentColumnEdit=null;
-const SORT_OPTIONS=new Map([["position","手动顺序"],["updated_desc","最近更新"],["updated_asc","最早更新"],["created_desc","最新创建"],["created_asc","最早创建"],["due_desc","最晚截止"],["due_asc","最早截止"]]),SORT_STORAGE_KEY="kanban-column-sorts";
-const HISTORY_SORT_OPTIONS=new Map([["archived_desc","最近归档"],["archived_asc","最早归档"],["updated_desc","最近更新"],["updated_asc","最早更新"],["created_desc","最新创建"],["created_asc","最早创建"]]),HISTORY_SORT_STORAGE_KEY="kanban-history-sort";
-const CARD_DESCRIPTION_OPTIONS=new Map([["none","不展示"],["one-line","展示一行"],["two-lines","展示两行"],["full","全展示"]]),CARD_DESCRIPTION_STORAGE_KEY="kanban-card-description-display";
-function columnSort(columnId){const value=state.sortByColumn[String(columnId)];return SORT_OPTIONS.has(value)?value:"position"}
-function loadSortPreferences(){try{const values=JSON.parse(localStorage.getItem(SORT_STORAGE_KEY)||"{}");if(values&&typeof values==="object"&&!Array.isArray(values))for(const[columnId,value]of Object.entries(values))if(SORT_OPTIONS.has(value))state.sortByColumn[columnId]=value}catch(_){state.sortByColumn={}}}
-function saveSortPreferences(){try{const columnIds=new Set(state.columns.map(column=>String(column.id))),values={};for(const[columnId,value]of Object.entries(state.sortByColumn))if(columnIds.has(columnId)&&SORT_OPTIONS.has(value)&&value!=="position")values[columnId]=value;state.sortByColumn=values;localStorage.setItem(SORT_STORAGE_KEY,JSON.stringify(values));localStorage.removeItem("kanban-card-sort")}catch(_){}}
-function loadHistorySortPreference(){try{const value=localStorage.getItem(HISTORY_SORT_STORAGE_KEY);state.historySort=HISTORY_SORT_OPTIONS.has(value)?value:"archived_desc"}catch(_){state.historySort="archived_desc"}}
-function saveHistorySortPreference(){try{localStorage.setItem(HISTORY_SORT_STORAGE_KEY,state.historySort)}catch(_){}}
-function loadCardDescriptionPreference(){try{const value=localStorage.getItem(CARD_DESCRIPTION_STORAGE_KEY);state.cardDescriptionDisplay=CARD_DESCRIPTION_OPTIONS.has(value)?value:"two-lines"}catch(_){state.cardDescriptionDisplay="two-lines"}}
-function saveCardDescriptionPreference(){try{localStorage.setItem(CARD_DESCRIPTION_STORAGE_KEY,state.cardDescriptionDisplay)}catch(_){}}
-function renderCardDescriptionPreference(){document.querySelectorAll('input[name="card-description-display"]').forEach(input=>input.checked=input.value===state.cardDescriptionDisplay)}
-function setCardDescriptionDisplay(value){if(!CARD_DESCRIPTION_OPTIONS.has(value))return;state.cardDescriptionDisplay=value;saveCardDescriptionPreference();renderCardDescriptionPreference();renderBoard();announce(`看板卡片描述已设为${CARD_DESCRIPTION_OPTIONS.get(value)}`)}
-function renderHistorySort(){const button=document.getElementById("history-sort-button"),menu=document.getElementById("history-sort-menu"),label=document.getElementById("history-sort-label"),current=HISTORY_SORT_OPTIONS.has(state.historySort)?state.historySort:"archived_desc";state.historySort=current;label.textContent=HISTORY_SORT_OPTIONS.get(current);button.setAttribute("aria-label",`历史卡片排序，当前：${HISTORY_SORT_OPTIONS.get(current)}`);button.setAttribute("aria-expanded",String(historySortOpen));menu.hidden=!historySortOpen;clearChildren(menu);for(const[value,text]of HISTORY_SORT_OPTIONS){const item=document.createElement("button"),active=value===current;item.type="button";item.setAttribute("role","menuitemradio");item.setAttribute("aria-checked",String(active));item.dataset.historySortValue=value;item.innerHTML=`<span class="sort-menu-check" aria-hidden="true">${active?"✓":""}</span><span>${text}</span>`;item.onclick=event=>{event.stopPropagation();state.historySort=value;saveHistorySortPreference();historySortOpen=false;renderHistorySort();state.searchAbort?.abort();state.searchCursor=null;doSearch();announce(`历史卡片已按${text}排序`)};menu.appendChild(item)}menu.onkeydown=event=>{const items=[...menu.querySelectorAll("button")],index=items.indexOf(document.activeElement);let next=index;if(event.key==="ArrowDown")next=(index+1)%items.length;else if(event.key==="ArrowUp")next=(index-1+items.length)%items.length;else if(event.key==="Home")next=0;else if(event.key==="End")next=items.length-1;else if(event.key==="Escape"){event.preventDefault();historySortOpen=false;renderHistorySort();button.focus();return}else return;event.preventDefault();items[next].focus()}}
-function toggleHistorySort(event){event.stopPropagation();historySortOpen=!historySortOpen;renderHistorySort();if(historySortOpen)requestAnimationFrame(()=>document.querySelector('#history-sort-menu button[aria-checked="true"]')?.focus())}
-function sortCards(cards,columnId){const sort=columnSort(columnId);if(sort==="position")return cards.slice().sort((a,b)=>a.position-b.position||a.id-b.id);const dueSort=sort.startsWith("due"),field=sort.startsWith("created")?"created_at":"updated_at",descending=sort.endsWith("desc");return cards.slice().sort((a,b)=>{const left=dueSort?dueSortTimestamp(a.due_date):parseLocalTimestamp(a[field])?.getTime(),right=dueSort?dueSortTimestamp(b.due_date):parseLocalTimestamp(b[field])?.getTime();if(left==null&&right==null)return a.position-b.position||a.id-b.id;if(left==null)return 1;if(right==null)return-1;if(left!==right)return descending?right-left:left-right;return a.position-b.position||a.id-b.id})}
-function versionPayload(item){return makeVersionPayload(item,state.revision)}
-function attachmentWorkPending(){return state.attachmentQueue.some(item=>["waiting","uploading","processing"].includes(item.status))}
-function resetAttachmentState(){state.attachmentAbort?.abort();state.attachmentAbort=null;state.attachments=[];state.attachmentQueue.forEach(item=>item.xhr?.abort());state.attachmentQueue=[];state.uploading=false;renderAttachments()}
-function selectAttachments(){document.getElementById("attachment-input").click()}
-async function loadAttachments(cardId=state.currentCardId){if(!cardId)return;state.attachmentAbort?.abort();const controller=new AbortController();state.attachmentAbort=controller;try{const items=await api("GET",`/api/cards/${cardId}/attachments`,undefined,{signal:controller.signal});if(cardId!==state.currentCardId)return;state.attachments=items;renderAttachments()}catch(error){if(error.name!=="AbortError")toast("附件加载失败："+error.message,true)}}
-function renderAttachments(){const list=document.getElementById("attachment-list"),queue=document.getElementById("attachment-queue");if(!list||!queue)return;clearChildren(list);state.attachments.forEach(item=>{const row=document.createElement("div");row.className="attachment-item"+(item.file_missing?" attachment-missing":"");const main=document.createElement("div");main.className="attachment-main";const name=document.createElement("div");name.className="attachment-name";name.textContent=item.file_name;const meta=document.createElement("div");meta.className="attachment-meta";meta.textContent=item.file_missing?"附件文件已不存在":`${formatBytes(item.size)}　更新于 ${item.updated_at}`;main.append(name,meta);const actions=document.createElement("div");actions.className="attachment-actions";if(!item.file_missing){const down=document.createElement("button");down.type="button";down.className="ghost";down.textContent="下载";down.setAttribute("aria-label",`下载附件 ${item.file_name}`);down.onclick=()=>download(`/api/attachments/${item.id}/download`);actions.appendChild(down)}if(!document.getElementById("card-modal").hidden){const remove=document.createElement("button");remove.type="button";remove.className="ghost danger-text";remove.textContent=item.file_missing?"清理记录":"删除";remove.setAttribute("aria-label",`${remove.textContent}附件 ${item.file_name}`);remove.onclick=()=>deleteAttachment(item);actions.appendChild(remove)}row.append(main,actions);list.appendChild(row)});clearChildren(queue);state.attachmentQueue.forEach(item=>{const row=document.createElement("div");row.className="attachment-item attachment-queued";const main=document.createElement("div");main.className="attachment-main";const name=document.createElement("div");name.className="attachment-name";name.textContent=item.file.name;const status=document.createElement("div");status.className="attachment-meta";status.textContent=item.status==="waiting"?"等待上传":item.status==="uploading"?`上传中 ${item.progress}%`:item.status==="processing"?"处理中…":item.status==="done"?"已完成":item.status==="cancelled"?"已取消":`上传失败：${item.error||"未知错误"}`;main.append(name,status);if(item.status==="uploading"){const progress=document.createElement("div");progress.className="attachment-progress";progress.setAttribute("role","progressbar");progress.setAttribute("aria-label",`${item.file.name} 上传进度`);progress.setAttribute("aria-valuemin","0");progress.setAttribute("aria-valuemax","100");progress.setAttribute("aria-valuenow",String(item.progress));const bar=document.createElement("span");bar.style.width=item.progress+"%";progress.appendChild(bar);main.appendChild(progress)}const actions=document.createElement("div");actions.className="attachment-actions";if(item.status==="failed"){const retry=document.createElement("button");retry.type="button";retry.className="ghost";retry.textContent="重试";retry.onclick=()=>{item.status="waiting";item.error="";processAttachmentQueue()};actions.appendChild(retry)}if(["waiting","uploading"].includes(item.status)){const cancel=document.createElement("button");cancel.type="button";cancel.className="ghost";cancel.textContent="取消";cancel.onclick=()=>{item.status="cancelled";item.xhr?.abort();renderAttachments()};actions.appendChild(cancel)}row.append(main,actions);queue.appendChild(row)})}
-function uploadAttachment(item,replace=false,version=null){return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest(),query=replace?"?replace=1":"";item.xhr=xhr;xhr.open("POST",`/api/cards/${state.currentCardId}/attachments${query}`);xhr.setRequestHeader("X-File-Name",encodeURIComponent(item.file.name));xhr.setRequestHeader("X-File-Type",item.file.type||"");if(version!=null)xhr.setRequestHeader("X-Attachment-Version",String(version));xhr.upload.onprogress=event=>{if(event.lengthComputable){item.status="uploading";item.progress=Math.round(event.loaded/event.total*100);renderAttachments()}};xhr.upload.onload=()=>{item.status="processing";renderAttachments()};xhr.onerror=()=>reject(new Error("网络错误"));xhr.onabort=()=>reject(Object.assign(new Error("已取消"),{code:"ABORTED"}));xhr.onload=()=>{let data={};try{data=xhr.responseText?JSON.parse(xhr.responseText):{}}catch(_){}if(xhr.status>=200&&xhr.status<300)resolve(data);else{const value=data.error||{},error=new Error(value.message||`请求失败 (${xhr.status})`);error.code=value.code;error.details=value.details;reject(error)}};xhr.send(item.file)})}
-async function processAttachmentQueue(){if(state.uploading||!state.currentCardId)return;state.uploading=true;try{for(const item of state.attachmentQueue){if(item.status!=="waiting")continue;try{let attachment;try{attachment=await uploadAttachment(item)}catch(error){if(error.code!=="ATTACHMENT_EXISTS")throw error;const old=error.details?.attachment;if(!old){item.status="cancelled";renderAttachments();continue}const overwrite=await chooseAction({title:"覆盖同名附件？",message:`附件“${item.file.name}”已经存在。\n\n现有文件更新时间：${old.updated_at}\n现有文件大小：${formatBytes(old.size)}\n新文件大小：${formatBytes(item.file.size)}`,primary:"覆盖附件",secondary:null,danger:true,focus:"cancel"});if(overwrite!=="primary"){item.status="cancelled";renderAttachments();continue}attachment=await uploadAttachment(item,true,old.version)}item.status="done";state.attachments=state.attachments.filter(value=>value.id!==attachment.id);state.attachments.push(attachment);state.attachments.sort((a,b)=>a.id-b.id);const card=state.cards.find(value=>value.id===state.currentCardId);if(card)card.attachment_count=state.attachments.length;renderAttachments();renderBoard();setTimeout(()=>{state.attachmentQueue=state.attachmentQueue.filter(value=>value.id!==item.id);renderAttachments()},1500)}catch(error){if(error.code==="ABORTED"){item.status="cancelled"}else{item.status="failed";item.error=error.code==="ATTACHMENT_VERSION_CONFLICT"?"附件已在其他页面被更新，请重新确认后再覆盖。":error.message;if(error.code==="ATTACHMENT_VERSION_CONFLICT")await loadAttachments()}renderAttachments()}}}finally{state.uploading=false;if(!attachmentWorkPending()&&!state.currentCardDraft){document.getElementById("card-meta").textContent="卡片和附件均已保存";announce("卡片和附件均已保存")}}}
-function queueAttachments(files){for(const file of files)state.attachmentQueue.push({id:crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random()),file,status:"waiting",progress:0,error:"",xhr:null});document.getElementById("attachment-input").value="";renderAttachments();processAttachmentQueue()}
-async function deleteAttachment(item){const decision=await chooseAction({title:"删除附件？",message:`附件“${item.file_name}”将被永久删除，且无法从历史归档中恢复。`,primary:"删除附件",secondary:null,danger:true,focus:"cancel"});if(decision!=="primary")return;try{const response=await fetch(`/api/attachments/${item.id}`,{method:"DELETE",headers:{"X-Attachment-Version":String(item.version)}}),data=await response.json();if(!response.ok){const error=new Error(data.error?.message||"删除失败");error.code=data.error?.code;throw error}state.attachments=state.attachments.filter(value=>value.id!==item.id);const card=state.cards.find(value=>value.id===state.currentCardId);if(card)card.attachment_count=state.attachments.length;renderAttachments();renderBoard()}catch(error){toast("删除附件失败："+error.message,true)}}
-async function toggleResultAttachments(card,button,box){const opening=box.hidden;if(!opening){box.hidden=true;button.setAttribute("aria-expanded","false");return}try{const items=await api("GET",`/api/cards/${card.id}/attachments`);clearChildren(box);items.forEach(item=>{const row=document.createElement("div");row.className="history-attachment";const text=document.createElement("span");text.textContent=`${item.file_name}　${formatBytes(item.size)}`;const down=document.createElement("button");down.type="button";down.className="ghost";down.textContent="下载";down.disabled=item.file_missing;down.onclick=()=>download(`/api/attachments/${item.id}/download`);row.append(text,down);box.appendChild(row)});box.hidden=false;button.setAttribute("aria-expanded","true")}catch(error){toast("附件加载失败："+error.message,true)}}
-const RICH_TEXT_COLORS={fg:new Set(["red","yellow","green","blue","purple"]),bg:new Set(["red","yellow","green","blue","purple"])};
-let openColorMenu=null,savedColorRange=null;
-function colorFamily(kind){return kind==="fg"?"rt-fg-":"rt-bg-"}
-function selectionInEditor(range){const editor=document.getElementById("card-description"),container=range?.commonAncestorContainer;return!!range&&!range.collapsed&&editor.contains(container.nodeType===Node.ELEMENT_NODE?container:container.parentNode)}
-function colorClasses(node,kind){const prefix=colorFamily(kind);return node.nodeType===Node.ELEMENT_NODE?[...node.classList].filter(value=>value.startsWith(prefix)):[]}
-function unwrapSpan(span){const parent=span.parentNode;while(span.firstChild)parent.insertBefore(span.firstChild,span);span.remove();return parent}
-function normalizeColorDom(root){let changed=true;while(changed){changed=false;root.querySelectorAll("span").forEach(span=>{if(!span.isConnected)return;if(!span.classList.length&&!span.attributes.length){unwrapSpan(span);changed=true;return}const parent=span.parentElement;if(parent?.tagName==="SPAN"&&parent.className===span.className&&span.attributes.length===1&&parent.attributes.length===1){while(span.firstChild)parent.insertBefore(span.firstChild,span);span.remove();changed=true}});root.querySelectorAll("span").forEach(span=>{let next=span.nextSibling;while(next?.nodeType===Node.TEXT_NODE&&!next.data)next=next.nextSibling;if(next?.nodeType===Node.ELEMENT_NODE&&next.tagName==="SPAN"&&next.className===span.className&&span.attributes.length===1&&next.attributes.length===1){while(next.firstChild)span.appendChild(next.firstChild);next.remove();changed=true}})}root.normalize()}
-function splitRangeBoundaries(range){for(const boundary of["end","start"]){const container=boundary==="start"?range.startContainer:range.endContainer,offset=boundary==="start"?range.startOffset:range.endOffset;if(container.nodeType!==Node.TEXT_NODE)continue;if(offset>0&&offset<container.data.length){const after=container.splitText(offset);if(boundary==="start")range.setStart(after,0);else range.setEnd(container,container.data.length)}}}
-function removeColorFromFragment(root,kind){root.querySelectorAll("span").forEach(span=>{for(const value of colorClasses(span,kind))span.classList.remove(value);if(!span.classList.length)unwrapSpan(span)})}
-function wrapUncoloredText(root,kind,className){const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),nodes=[];while(walker.nextNode())if(walker.currentNode.data)nodes.push(walker.currentNode);nodes.forEach(node=>{let parent=node.parentElement,hasFamily=false;while(parent&&parent!==root){if(colorClasses(parent,kind).length){hasFamily=true;break}parent=parent.parentElement}if(hasFamily)return;const span=document.createElement("span");span.className=className;node.parentNode.insertBefore(span,node);span.appendChild(node)})}
-function closeColorMenu(restoreFocus=false){if(!openColorMenu)return;const menu=document.getElementById(openColorMenu+"-color-menu"),button=document.getElementById(openColorMenu+"-color-button");menu.hidden=true;button.setAttribute("aria-expanded","false");openColorMenu=null;if(restoreFocus)button.focus()}
-function toggleColorMenu(kind){const key=kind==="fg"?"text":"highlight",menu=document.getElementById(key+"-color-menu"),button=document.getElementById(key+"-color-button"),opening=openColorMenu!==key,selection=window.getSelection();if(selection?.rangeCount&&selectionInEditor(selection.getRangeAt(0)))savedColorRange=selection.getRangeAt(0).cloneRange();closeColorMenu();if(!opening)return;openColorMenu=key;menu.hidden=false;button.setAttribute("aria-expanded","true");requestAnimationFrame(()=>menu.querySelector("button")?.focus())}
-function applyDescriptionColor(kind,value){if(!RICH_TEXT_COLORS[kind]?.has(value)&&value!=="")return;const selection=window.getSelection(),range=savedColorRange,editor=document.getElementById("card-description");if(!selectionInEditor(range)){toast("请先选择文字",true);savedColorRange=null;closeColorMenu(true);return}splitRangeBoundaries(range);const fragment=range.extractContents();removeColorFromFragment(fragment,kind);if(value)wrapUncoloredText(fragment,kind,colorFamily(kind)+value);const marker=document.createElement("span");marker.dataset.colorMarker="";range.insertNode(marker);marker.before(fragment);normalizeColorDom(editor);const caret=document.createRange();caret.setStartAfter(marker);caret.collapse(true);selection.removeAllRanges();selection.addRange(caret);marker.remove();savedColorRange=null;closeColorMenu(true);editor.focus();announce(value?"已应用文字颜色":"已清除文字颜色")}
-function setupColorMenus(){for(const[kind,key]of[["fg","text"],["bg","highlight"]]){const button=document.getElementById(key+"-color-button"),menu=document.getElementById(key+"-color-menu");button.addEventListener("mousedown",event=>event.preventDefault());button.addEventListener("click",()=>toggleColorMenu(kind));menu.addEventListener("mousedown",event=>{if(event.target.closest("button"))event.preventDefault()});menu.addEventListener("click",event=>{const item=event.target.closest("button[data-color-value]");if(item)applyDescriptionColor(kind,item.dataset.colorValue)});menu.addEventListener("keydown",event=>{const items=[...menu.querySelectorAll("button")],index=items.indexOf(document.activeElement);let next=index;if(event.key==="ArrowDown"||event.key==="ArrowRight")next=(index+1)%items.length;else if(event.key==="ArrowUp"||event.key==="ArrowLeft")next=(index-1+items.length)%items.length;else if(event.key==="Home")next=0;else if(event.key==="End")next=items.length-1;else if(event.key==="Escape"){event.preventDefault();closeColorMenu(true);return}else return;event.preventDefault();items[next].focus()})}document.addEventListener("click",event=>{if(openColorMenu&&!event.target.closest(".rich-color-picker"))closeColorMenu()})}
-function setupEditorToolbar(){const toolbar=document.getElementById("editor-toolbar"),run=button=>document.execCommand(button.dataset.cmd,false,null);toolbar.addEventListener("mousedown",event=>{const button=event.target.closest("button[data-cmd]");if(button){event.preventDefault();run(button)}});toolbar.addEventListener("click",event=>{const button=event.target.closest("button[data-cmd]");if(button&&event.detail===0)run(button)});setupColorMenus()}
-function stripHtml(html){const box=document.createElement("div");box.innerHTML=html||"";box.querySelectorAll("br").forEach(node=>node.replaceWith("\n"));return(box.innerText||box.textContent||"").replace(/\n{3,}/g,"\n\n").trim()}
-async function showView(view,options={}){if(isCardDirty()){const decision=await chooseAction({title:"离开卡片编辑？",message:"当前卡片有尚未保存的修改。离开后这些修改将丢失。",primary:"放弃修改并离开",secondary:null,danger:true,focus:"cancel"});if(decision!=="primary")return false}for(const name of["board","history","settings"])document.getElementById("view-"+name).hidden=name!==view;for(const name of["board","history"]){const button=document.getElementById("btn-"+name),active=name===view;button.classList.toggle("active",active);button.setAttribute("aria-selected",String(active));button.tabIndex=active?0:-1}const settingsButton=document.getElementById("settings-button"),settingsActive=view==="settings";settingsButton.classList.toggle("active",settingsActive);settingsButton.setAttribute("aria-pressed",String(settingsActive));if(options.focusTab&&view!=="settings")document.getElementById("btn-"+view).focus();else if(view==="history")document.getElementById("search-q").focus();else if(view==="settings")document.getElementById("view-settings").focus();return true}
-function setupViewTabs(){const tabs=[...document.querySelectorAll('.view-tabs [role="tab"]')];document.querySelector(".view-tabs").addEventListener("keydown",event=>{const index=tabs.indexOf(event.target);if(index<0)return;let next=index;if(event.key==="ArrowRight")next=(index+1)%tabs.length;else if(event.key==="ArrowLeft")next=(index-1+tabs.length)%tabs.length;else if(event.key==="Home")next=0;else if(event.key==="End")next=tabs.length-1;else return;event.preventDefault();void showView(tabs[next].id==="btn-board"?"board":"history",{focusTab:true})})}
-async function refresh(force=false){if(!force&&isCardDirty()){const decision=await chooseAction({title:"刷新看板？",message:"刷新将丢弃当前卡片尚未保存的修改。",primary:"放弃修改并刷新",secondary:null,danger:true,focus:"cancel"});if(decision!=="primary")return}const board=document.getElementById("board");if(!state.columns.length){board.innerHTML='<div class="board-status" role="status">正在加载看板…</div>'}try{const data=await api("GET","/api/board");state.columns=data.columns;state.cards=data.cards;state.revision=data.revision;saveSortPreferences();renderFilters();renderBoard()}catch(error){if(state.columns.length){const status=document.createElement("div");status.className="board-status board-error";status.textContent="刷新失败，当前显示的是上次加载内容。";board.prepend(status)}else{board.innerHTML='<div class="board-status board-error">看板加载失败。<button type="button" class="ghost board-retry">重新加载</button></div>';board.querySelector(".board-retry").onclick=()=>refresh(true)}toast("加载失败："+error.message,true)}}
-function parseLabels(value){const result=[],seen=new Set();(value||"").split(/[,，]/).map(v=>v.trim()).filter(Boolean).forEach(label=>{const key=label.toLocaleLowerCase();if(!seen.has(key)){seen.add(key);result.push({key,label})}});return result}
-function labelColor(label){let hash=0;for(const char of label.toLocaleLowerCase())hash=((hash<<5)-hash+char.charCodeAt(0))|0;return"label-color-"+Math.abs(hash%10)}
-function visibleCards(){return state.cards.filter(card=>{if(state.filters.due==="today"&&!isToday(card))return false;if(state.filters.due==="overdue"&&!isOverdue(card))return false;if(state.filters.priority!=="all"&&card.priority!==state.filters.priority)return false;if(state.filters.labels.length){const keys=new Set(parseLabels(card.labels).map(item=>item.key));if(!state.filters.labels.some(label=>keys.has(label)))return false}return true})}
-function renderFilterSummary(){const box=document.getElementById("filter-summary"),parts=[];if(state.filters.due!=="all")parts.push(state.filters.due==="today"?"今日截止":"已逾期");if(state.filters.priority!=="all")parts.push(`${priorityLabel(state.filters.priority)}优先级`);if(state.filters.labels.length)parts.push(`${state.filters.labels.length} 个标签`);box.hidden=!parts.length;box.textContent=parts.length?`${parts.join(" · ")} · 显示 ${visibleCards().length}/${state.cards.length} 张卡片`:""}
-function renderFilters(){const dueBox=document.getElementById("due-filters");clearChildren(dueBox);[["all","全部",state.cards.length],["today","今日",state.cards.filter(isToday).length],["overdue","逾期",state.cards.filter(isOverdue).length]].forEach(([key,label,count])=>{const button=document.createElement("button");button.type="button";button.className="filter-chip"+(state.filters.due===key?" active":"");button.setAttribute("aria-pressed",String(state.filters.due===key));button.textContent=`${label} ${count}`;button.onclick=()=>{state.filters.due=key;renderFilters();renderBoard();announce(`当前显示 ${visibleCards().length} 张卡片`)};dueBox.appendChild(button)});const priorityBox=document.getElementById("priority-filters");clearChildren(priorityBox);[["high","高","priority-high"],["medium","中","priority-medium"],["low","低","priority-low"]].forEach(([key,label,dotClass])=>{const active=state.filters.priority===key,button=document.createElement("button");button.type="button";button.className="filter-chip priority-filter-chip"+(active?" active":"");button.setAttribute("aria-pressed",String(active));const count=state.cards.filter(card=>card.priority===key).length;const dot=document.createElement("span");dot.className="filter-priority-dot "+dotClass;dot.setAttribute("aria-hidden","true");button.appendChild(dot);button.append(document.createTextNode(`${label} ${count}`));button.onclick=()=>{state.filters.priority=active?"all":key;renderFilters();renderBoard();announce(`当前显示 ${visibleCards().length} 张卡片`)};priorityBox.appendChild(button)});const labels=new Map();state.cards.forEach(card=>parseLabels(card.labels).forEach(item=>{if(!labels.has(item.key))labels.set(item.key,item.label)}));const labelBox=document.getElementById("label-filters");clearChildren(labelBox);[...labels].sort((a,b)=>a[1].localeCompare(b[1],"zh-CN")).forEach(([key,label])=>{const active=state.filters.labels.includes(key),button=document.createElement("button");button.type="button";button.className=`filter-chip card-label ${labelColor(label)}`+(active?" active":"");button.setAttribute("aria-pressed",String(active));button.textContent=label;button.onclick=()=>toggleLabelFilter(key);labelBox.appendChild(button)});renderFilterSummary();document.getElementById("clear-filters").hidden=!hasActiveFilters()}
-function toggleLabelFilter(key){state.filters.labels=state.filters.labels.includes(key)?state.filters.labels.filter(value=>value!==key):[...state.filters.labels,key];renderFilters();renderBoard();announce(`当前显示 ${visibleCards().length} 张卡片`)}
-function clearBoardFilters(){state.filters={due:"all",priority:"all",labels:[]};renderFilters();renderBoard();announce(`已清除筛选，显示 ${state.cards.length} 张卡片`)}
-
-function hideAutoArchiveTooltip(){if(autoArchiveTooltipTimer!==null){clearTimeout(autoArchiveTooltipTimer);autoArchiveTooltipTimer=null}if(autoArchiveTooltip)autoArchiveTooltip.hidden=true;autoArchiveTooltip=null}
-function setupAutoArchiveTooltip(header,tooltip){const trigger=event=>{if(event.target.closest(".column-actions"))return;hideAutoArchiveTooltip();autoArchiveTooltip=tooltip;autoArchiveTooltipTimer=setTimeout(()=>{autoArchiveTooltipTimer=null;if(header.isConnected&&header.matches(":hover")&&!header.querySelector(".column-actions:hover"))tooltip.hidden=false},1000)};header.addEventListener("pointerover",event=>{if(event.target.closest(".column-actions")){hideAutoArchiveTooltip();return}if(event.relatedTarget&&header.contains(event.relatedTarget)&&!event.relatedTarget.closest?.(".column-actions"))return;trigger(event)});header.addEventListener("pointerout",event=>{if(event.relatedTarget&&header.contains(event.relatedTarget)){if(event.relatedTarget.closest?.(".column-actions"))hideAutoArchiveTooltip();return}hideAutoArchiveTooltip()});header.addEventListener("pointerdown",hideAutoArchiveTooltip);header.querySelector(".column-actions").addEventListener("pointerenter",hideAutoArchiveTooltip)}
-
-function renderColumnSort(column,actions){const sort=columnSort(column.id),button=document.createElement("button");button.type="button";button.className="column-sort-button"+(sort!=="position"?" active":"");button.setAttribute("aria-label",`排序列 ${column.name}，当前：${SORT_OPTIONS.get(sort)}`);button.setAttribute("aria-haspopup","menu");button.setAttribute("aria-expanded",String(openSortColumnId===column.id));button.title=sort==="position"?"卡片排序：手动顺序":`卡片排序：${SORT_OPTIONS.get(sort)}。拖动位置将在切回手动顺序后显示。`;button.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h9M8 18h6M4 5v14m0 0-2.5-2.5M4 19l2.5-2.5"/></svg>';button.onclick=event=>{event.stopPropagation();hideAutoArchiveTooltip();openSortColumnId=openSortColumnId===column.id?null:column.id;renderBoard();if(openSortColumnId===column.id)requestAnimationFrame(()=>document.querySelector(`.column[data-col-id="${column.id}"] .column-sort-menu button[aria-checked="true"]`)?.focus())};actions.appendChild(button);if(openSortColumnId!==column.id)return;const menu=document.createElement("div");menu.className="column-sort-menu";menu.setAttribute("role","menu");menu.setAttribute("aria-label",`排序列 ${column.name}`);for(const[value,label]of SORT_OPTIONS){const item=document.createElement("button"),active=value===sort;item.type="button";item.setAttribute("role","menuitemradio");item.setAttribute("aria-checked",String(active));item.dataset.sortValue=value;item.innerHTML=`<span class="sort-menu-check" aria-hidden="true">${active?"✓":""}</span><span>${label}</span>`;item.onclick=event=>{event.stopPropagation();if(value==="position")delete state.sortByColumn[String(column.id)];else state.sortByColumn[String(column.id)]=value;saveSortPreferences();openSortColumnId=null;renderBoard();announce(`列 ${column.name} 已按${label}排序`)};menu.appendChild(item)}menu.onkeydown=event=>{const items=[...menu.querySelectorAll("button")],index=items.indexOf(document.activeElement);let next=index;if(event.key==="ArrowDown")next=(index+1)%items.length;else if(event.key==="ArrowUp")next=(index-1+items.length)%items.length;else if(event.key==="Home")next=0;else if(event.key==="End")next=items.length-1;else if(event.key==="Escape"){event.preventDefault();openSortColumnId=null;renderBoard();requestAnimationFrame(()=>document.querySelector(`.column[data-col-id="${column.id}"] .column-sort-button`)?.focus());return}else return;event.preventDefault();items[next].focus()};actions.appendChild(menu)}
-
-function renderBoard(){hideAutoArchiveTooltip();const board=document.getElementById("board");clearChildren(board);document.getElementById("filter-reorder-hint").hidden=!isManualReorderDisabled();state.columns.slice().sort((a,b)=>a.position-b.position).forEach(column=>board.appendChild(renderColumn(column)));const add=document.createElement("button");add.className="add-column-btn";add.textContent="+ 新增列";add.onclick=addColumn;board.appendChild(add)}
-function renderColumn(column){const element=document.createElement("section");element.className="column";element.dataset.colId=column.id;const header=document.createElement("div");header.className="column-header";header.draggable=!isManualReorderDisabled();header.dataset.colId=column.id;const allCards=state.cards.filter(card=>card.column_id===column.id),cards=visibleCards().filter(card=>card.column_id===column.id);const title=document.createElement("h2");title.className="column-title";title.id=`column-title-${column.id}`;title.textContent=column.name;element.setAttribute("aria-labelledby",title.id);const count=document.createElement("span");count.className="column-count";count.textContent=cards.length===allCards.length?cards.length:`${cards.length}/${allCards.length}`;const actions=document.createElement("div");actions.className="column-actions";renderColumnSort(column,actions);for(const[icon,label,handler]of[["<svg class=\"svg-icon column-action-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 20h4l11-11-4-4L4 16v4Zm9-13 4 4\"/></svg>","重命名",()=>renameColumn(column)],["<svg class=\"svg-icon column-action-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7\"/></svg>","删除",()=>deleteColumn(column)]]){const button=document.createElement("button");button.type="button";button.className="column-action-button "+(label==="删除"?"column-delete-button":"column-edit-button");button.innerHTML=icon;button.setAttribute("aria-label",`${label}列 ${column.name}`);button.onclick=event=>{event.stopPropagation();hideAutoArchiveTooltip();handler()};actions.appendChild(button)}header.append(title,count,actions);if(column.name.trim()==="已完成"){const tooltip=document.createElement("div");tooltip.className="auto-archive-tooltip";tooltip.setAttribute("role","tooltip");tooltip.textContent="自动归档：卡片进入“已完成”列满 30 天后，将移入历史归档。";tooltip.hidden=true;header.appendChild(tooltip);setupAutoArchiveTooltip(header,tooltip)}element.appendChild(header);const list=document.createElement("div");list.className="card-list";list.dataset.colId=column.id;sortCards(cards,column.id).forEach(card=>list.appendChild(renderCard(card)));if(!cards.length&&allCards.length){const empty=document.createElement("div");empty.className="filter-empty";empty.textContent="没有符合筛选的卡片";list.appendChild(empty)}element.append(list,renderQuickCreate(column));setupColumnDropZone(list);header.addEventListener("dragstart",onColumnDragStart);header.addEventListener("dragend",onColumnDragEnd);return element}
-function renderQuickCreate(column){if(state.quickCreate.columnId!==column.id){const add=document.createElement("button");add.className="add-card-btn";add.textContent="+ 添加卡片";add.onclick=()=>{state.quickCreate={columnId:column.id,title:"",submitting:false};renderBoard();requestAnimationFrame(()=>document.querySelector(".quick-card-input")?.focus())};return add}const form=document.createElement("div");form.className="quick-card-form";const input=document.createElement("textarea");input.className="quick-card-input";input.rows=2;input.placeholder="输入卡片标题…";input.value=state.quickCreate.title;input.oninput=()=>state.quickCreate.title=input.value;input.onkeydown=event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.isComposing){event.preventDefault();quickCreateCard(column.id)}if(event.key==="Escape"){state.quickCreate={columnId:null,title:"",submitting:false};renderBoard()}};const buttons=document.createElement("div");buttons.className="quick-card-actions";const submit=document.createElement("button");submit.className="primary";submit.textContent=state.quickCreate.submitting?"添加中…":"添加";submit.disabled=state.quickCreate.submitting;submit.onclick=()=>quickCreateCard(column.id);const details=document.createElement("button");details.className="ghost";details.textContent="详细";details.onclick=async()=>{const title=state.quickCreate.title;state.quickCreate={columnId:null,title:"",submitting:false};renderBoard();await openNewCard(column.id);if(state.currentCardDraft)document.getElementById("card-title").value=title};const cancel=document.createElement("button");cancel.className="ghost";cancel.textContent="取消";cancel.onclick=()=>{state.quickCreate={columnId:null,title:"",submitting:false};renderBoard()};buttons.append(submit,details,cancel);form.append(input,buttons);return form}
-async function quickCreateCard(columnId){const title=state.quickCreate.title.trim();if(state.quickCreate.submitting)return;if(!title){toast("标题不能为空",true);document.querySelector(".quick-card-input")?.focus();return}state.quickCreate.submitting=true;renderBoard();try{await api("POST","/api/cards",{column_id:columnId,title,description:"",labels:"",due_date:"",priority:"medium",expected_board_revision:state.revision});state.quickCreate={columnId:null,title:"",submitting:false};await refresh(true);toast(hasActiveFilters()?"已创建；新卡片可能不符合当前筛选条件":"已创建")}catch(error){state.quickCreate.submitting=false;toast("创建失败："+error.message,true);renderBoard()}}
-function renderCard(card){const element=document.createElement("article");element.className="card priority-"+card.priority;element.dataset.cardId=card.id;element.tabIndex=0;element.setAttribute("role","button");element.setAttribute("aria-label",`${card.title}，${priorityLabel(card.priority)}优先级${card.attachment_count?`，${card.attachment_count} 个附件`:""}，创建于 ${fullTimestamp(card.created_at)}`);element.draggable=!isManualReorderDisabled();const title=document.createElement("div");title.className="card-title";title.textContent=card.title;element.appendChild(title);if(card.description&&state.cardDescriptionDisplay!=="none"){const description=document.createElement("div");description.className="card-desc";if(state.cardDescriptionDisplay!=="full")description.classList.add(state.cardDescriptionDisplay);description.innerHTML=card.description;element.appendChild(description)}const labels=parseLabels(card.labels);if(labels.length){const wrap=document.createElement("div");wrap.className="card-labels";labels.forEach(item=>{const tag=document.createElement("button");tag.type="button";tag.className=`card-label ${labelColor(item.label)}`;tag.textContent=item.label;tag.onclick=event=>{event.stopPropagation();toggleLabelFilter(item.key)};wrap.appendChild(tag)});element.appendChild(wrap)}const footer=document.createElement("div");footer.className="card-footer";const created=document.createElement("span");created.className="card-created-text";created.textContent=`创建于 ${compactCreatedTime(card.created_at)}`;created.title=`创建时间：${fullTimestamp(card.created_at)}`;footer.appendChild(created);if(card.attachment_count){const attachment=document.createElement("span");attachment.className="card-attachment-count";attachment.innerHTML='<svg class="svg-icon card-meta-icon card-attachment-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 12.5 15 6a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7.1-7.1l8.2-8.2"/></svg><span></span>';attachment.lastElementChild.textContent=String(card.attachment_count);footer.appendChild(attachment)}if(card.due_date){const due=document.createElement("span");due.className="card-due "+dueClass(card.due_date);due.innerHTML='<svg class="svg-icon card-meta-icon card-due-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg><span></span>';due.lastElementChild.textContent=dueDisplay(card.due_date);footer.appendChild(due)}element.appendChild(footer);element.onclick=()=>openEditCard(card.id);element.onkeydown=event=>{if((event.key==="Enter"||event.key===" ")&&event.target===element){event.preventDefault();openEditCard(card.id)}};element.addEventListener("dragstart",onCardDragStart);element.addEventListener("dragend",onCardDragEnd);return element}
-function priorityLabel(value){return value==="high"?"高":value==="low"?"低":"中"}
-function setCardDragImage(event){const source=event.currentTarget,preview=source.cloneNode(true),box=source.getBoundingClientRect();preview.classList.remove("dragging");preview.classList.add("card-drag-preview");preview.removeAttribute("id");preview.removeAttribute("role");preview.removeAttribute("tabindex");preview.draggable=false;preview.style.width=box.width+"px";document.body.appendChild(preview);event.dataTransfer.setDragImage(preview,Math.min(Math.max(event.clientX-box.left,0),box.width),Math.min(Math.max(event.clientY-box.top,0),box.height));requestAnimationFrame(()=>preview.remove())}
-function onCardDragStart(event){if(isManualReorderDisabled()||event.target.closest("button")){event.preventDefault();return}drag.cardId=Number(event.currentTarget.dataset.cardId);drag.sourceColId=Number(event.currentTarget.closest(".card-list").dataset.colId);event.dataTransfer.effectAllowed="move";setCardDragImage(event);event.currentTarget.classList.add("dragging");event.dataTransfer.setData("text/plain",String(drag.cardId))}function onCardDragEnd(event){event.currentTarget.classList.remove("dragging");document.querySelectorAll(".drop-placeholder").forEach(node=>node.remove());drag={cardId:null,sourceColId:null}}
-function onColumnDragStart(event){hideAutoArchiveTooltip();if(isManualReorderDisabled()||event.target.closest(".column-actions")||!event.currentTarget.draggable){event.preventDefault();return}colDrag.colId=Number(event.currentTarget.dataset.colId);colDrag.colEl=event.currentTarget.closest(".column");colDrag.colEl.classList.add("dragging");event.dataTransfer.setData("text/plain","col:"+colDrag.colId)}function onColumnDragEnd(){colDrag.colEl?.classList.remove("dragging");colDrag={colId:null,colEl:null}}
-function setupBoardColumnDrop(){const board=document.getElementById("board");board.addEventListener("dragover",event=>{if(isManualReorderDisabled()||colDrag.colId==null)return;event.preventDefault();const after=getColumnDragAfter(board,event.clientX);after?board.insertBefore(colDrag.colEl,after):board.appendChild(colDrag.colEl)});board.addEventListener("drop",async event=>{if(isManualReorderDisabled()||colDrag.colId==null)return;event.preventDefault();const ids=[...board.querySelectorAll(".column")].map(node=>Number(node.dataset.colId));try{await api("POST","/api/columns/reorder",{ids,expected_board_revision:state.revision});await refresh(true)}catch(error){toast("列排序失败："+error.message,true);await refresh(true)}})}
-function getColumnDragAfter(board,x){return[...board.querySelectorAll(".column:not(.dragging)")].reduce((best,child)=>{const box=child.getBoundingClientRect(),offset=x-box.left-box.width/2;return offset<0&&offset>best.offset?{offset,element:child}:best},{offset:-Infinity}).element}
-function setupColumnDropZone(list){list.addEventListener("dragover",event=>{if(isManualReorderDisabled()||drag.cardId==null)return;event.preventDefault();const after=getDragAfterElement(list,event.clientY);let placeholder=list.querySelector(".drop-placeholder");if(!placeholder){placeholder=document.createElement("div");placeholder.className="drop-placeholder"}after?list.insertBefore(placeholder,after):list.appendChild(placeholder)});list.addEventListener("drop",async event=>{if(isManualReorderDisabled()||drag.cardId==null)return;event.preventDefault();const card=state.cards.find(item=>item.id===drag.cardId),target=Number(list.dataset.colId),placeholder=list.querySelector(".drop-placeholder");let position=0,node=placeholder?.previousElementSibling;while(node){if(node.classList.contains("card")&&!node.classList.contains("dragging"))position++;node=node.previousElementSibling}placeholder?.remove();try{await api("PUT",`/api/cards/${card.id}/move`,{column_id:target,position,...versionPayload(card)});await refresh(true)}catch(error){toast("移动失败："+error.message,true);await refresh(true)}})}function getDragAfterElement(container,y){return[...container.querySelectorAll(".card:not(.dragging)")].reduce((best,child)=>{const box=child.getBoundingClientRect(),offset=y-box.top-box.height/2;return offset<0&&offset>best.offset?{offset,element:child}:best},{offset:-Infinity}).element}
-function populateCardColumns(selected){const select=document.getElementById("card-column");clearChildren(select);state.columns.forEach(column=>{const option=document.createElement("option");option.value=column.id;option.textContent=column.name;option.selected=column.id===selected;select.appendChild(option)})}function cardSnapshot(){return{title:document.getElementById("card-title").value,description:document.getElementById("card-description").innerHTML,labels:document.getElementById("card-labels").value,due:document.getElementById("card-due").value,time:document.getElementById("card-due-time").value,priority:document.getElementById("card-priority").value,column:document.getElementById("card-column").value}}function isCardDirty(){return!document.getElementById("card-modal").hidden&&state.initialCardSnapshot&&JSON.stringify(cardSnapshot())!==JSON.stringify(state.initialCardSnapshot)}
-function openModal(id,opener,focusId){showModal(id,state,opener,focusId)}function hideModal(id){dismissModal(id,state)}
-async function openNewCard(columnId){state.currentCardId=null;state.currentCardCol=columnId;state.currentCardDraft=false;resetAttachmentState();try{const result=await api("POST","/api/cards/drafts",{column_id:columnId,expected_board_revision:state.revision});state.currentCardId=result.card.id;state.currentCardVersion=result.card.version;state.currentCardDraft=true}catch(error){toast("无法创建卡片草稿："+error.message,true);return}document.querySelector(".card-archive-btn").hidden=true;document.querySelector(".card-permanent-delete-btn").hidden=true;document.getElementById("modal-title-text").textContent="新建卡片";for(const id of["card-title","card-labels","card-due","card-due-time"])document.getElementById(id).value="";document.getElementById("card-description").innerHTML="";document.getElementById("card-priority").value="medium";syncCardDateControl();syncCardTimeControl();document.getElementById("card-meta").textContent="草稿已创建，可立即添加附件";populateCardColumns(columnId);document.getElementById("card-move-controls").hidden=true;openModal("card-modal",document.activeElement,"card-title");state.initialCardSnapshot=cardSnapshot();renderAttachments()}
-function openEditCard(cardId){const card=state.cards.find(item=>item.id===cardId);if(!card)return;state.currentCardId=cardId;state.currentCardVersion=card.version;state.currentCardDraft=false;state.currentCardCol=card.column_id;resetAttachmentState();document.querySelector(".card-archive-btn").hidden=false;document.querySelector(".card-permanent-delete-btn").hidden=false;document.getElementById("modal-title-text").textContent="编辑卡片";document.getElementById("card-title").value=card.title;document.getElementById("card-description").innerHTML=card.description||"";document.getElementById("card-labels").value=card.labels||"";const due=splitDue(card.due_date);document.getElementById("card-due").value=due.date;syncCardDateControl();document.getElementById("card-due-time").value=due.time;syncCardTimeControl();document.getElementById("card-priority").value=card.priority;document.getElementById("card-meta").textContent=`创建于 ${card.created_at}　更新于 ${card.updated_at}`;populateCardColumns(card.column_id);document.getElementById("card-move-controls").hidden=isManualReorderDisabled();openModal("card-modal",document.querySelector(`.card[data-card-id="${cardId}"]`),"card-title");state.initialCardSnapshot=cardSnapshot();loadAttachments(cardId)}
-async function closeCardModal(force=false){const pending=attachmentWorkPending(),draftHasWork=state.currentCardDraft&&(isCardDirty()||state.attachments.length||state.attachmentQueue.length),editedHasWork=!state.currentCardDraft&&(isCardDirty()||pending);if(!force&&draftHasWork){const uploaded=state.attachments.length,queued=state.attachmentQueue.filter(item=>["waiting","uploading","processing"].includes(item.status)).length,decision=await chooseAction({title:"取消新建卡片？",message:`草稿、已上传附件以及等待中或正在上传的附件都将被永久删除。此操作无法撤销。\n\n已上传附件：${uploaded} 个\n等待中或正在上传：${queued} 个`,primary:"删除草稿",secondary:null,danger:true,focus:"cancel"});if(decision!=="primary")return false}else if(!force&&editedHasWork){const message=`卡片内容的未保存修改将丢失。已完成的附件上传、覆盖或删除会保留。${pending?"\n等待中或正在上传的附件将被取消。":""}`,decision=await chooseAction({title:"放弃未保存的修改？",message,primary:"放弃修改并关闭",secondary:null,danger:true,focus:"cancel"});if(decision!=="primary")return false}state.attachmentQueue.forEach(item=>{if(["waiting","uploading","processing"].includes(item.status)){item.status="cancelled";item.xhr?.abort()}});if(state.currentCardDraft&&state.currentCardId){try{const response=await fetch(`/api/cards/${state.currentCardId}/draft`,{method:"DELETE",headers:{"X-Card-Version":String(state.currentCardVersion)}});if(!response.ok&&!force){const data=await response.json();throw new Error(data.error?.message||"草稿清理失败")}}catch(error){if(!force){toast("草稿清理失败："+error.message,true);return false}}}state.initialCardSnapshot=null;state.currentCardId=null;state.currentCardDraft=false;resetAttachmentState();hideModal("card-modal");return true}
-async function saveCard(){if(state.saving)return false;const snapshot=cardSnapshot(),title=snapshot.title.trim(),button=document.querySelector(".card-save-btn");if(!title){toast("标题不能为空",true);document.getElementById("card-title").focus();return false}if(snapshot.time&&!snapshot.due){toast("请先选择截止日期",true);document.getElementById("card-due").focus();return false}state.saving=true;setBusy(button,true,"保存中…");const selectedColumn=Number(snapshot.column),payload={column_id:selectedColumn,title,description:snapshot.description.trim(),labels:snapshot.labels.trim(),due_date:joinDue(snapshot.due,snapshot.time),priority:snapshot.priority,expected_board_revision:state.revision};try{let saved;if(state.currentCardDraft){saved=await api("PUT",`/api/cards/${state.currentCardId}/finalize`,{...payload,expected_version:state.currentCardVersion});state.currentCardDraft=false}else{const card=state.cards.find(item=>item.id===state.currentCardId);saved=await api("PUT",`/api/cards/${card.id}`,{...payload,expected_version:card.version})}state.currentCardVersion=saved.card.version;state.revision=saved.revision;state.initialCardSnapshot=cardSnapshot();await refresh(true);if(attachmentWorkPending()){document.getElementById("card-meta").textContent="卡片已保存，附件继续上传中";toast("卡片已保存，附件继续上传中")}else{await closeCardModal(true);toast("已保存")}return true}catch(error){toast((error.code?.includes("CONFLICT")?"保存冲突：":"保存失败：")+error.message,true);return false}finally{state.saving=false;setBusy(button,false)}}
-async function confirmDirtyAction(actionLabel){if(!isCardDirty())return"secondary";return chooseAction({title:`${actionLabel}卡片`,message:"当前卡片内容尚未保存，请选择处理方式。",primary:`保存并${actionLabel}`,secondary:`放弃修改并${actionLabel}`})}
-async function archiveCard(card){const decision=await confirmDirtyAction("归档");if(decision==="cancel")return;if(decision==="primary"&&!await saveCard())return;const current=state.cards.find(item=>item.id===card.id)||card,confirmation=await chooseAction({title:"归档卡片？",message:`“${current.title}”将移入历史归档，之后可以恢复。`,primary:"归档卡片",secondary:null,primaryClass:"ghost",focus:"cancel"});if(confirmation!=="primary")return;try{const result=await api("DELETE",`/api/cards/${current.id}`,versionPayload(current));closeCardModal(true);await refresh(true);toast(`已归档“${current.title}”`,{duration:6000,actionText:"撤销",onAction:async()=>{await api("POST",`/api/cards/${current.id}/restore`,{target_column_id:result.column_id,position:result.position,expected_version:result.version,expected_board_revision:state.revision});await refresh(true);toast("已恢复")}})}catch(error){toast("归档失败："+error.message,true)}}
-function currentCardForAction(){return state.cards.find(item=>item.id===state.currentCardId)}
-async function archiveCurrentCard(){if(state.currentCardDraft)return closeCardModal();const card=currentCardForAction();if(card)await archiveCard(card)}
-function permanentDeleteMessage(card,unsaved){const count=Number(card.attachment_count)||state.attachments.length||0;return`你将永久删除卡片“${card.title}”。\n\n附件：${count} 个（将一并永久删除）\n${unsaved?"未保存修改：有（将永久丢失）":"未保存修改：无"}\n\n此操作不可撤销、不能从历史恢复，也没有撤销入口。`}
-async function confirmPermanentDelete(card,unsaved){const opener=document.activeElement,first=await chooseAction({title:"永久删除卡片？",message:permanentDeleteMessage(card,unsaved),primary:"继续永久删除",secondary:null,primaryClass:"ghost",focus:"cancel",opener,restoreFocus:false});if(first!=="primary"){if(opener?.isConnected)opener.focus();return false}const second=await chooseAction({title:"最后确认：无法恢复",message:`确认永久删除“${card.title}”及其 ${Number(card.attachment_count)||state.attachments.length||0} 个附件？此操作立即生效且无撤销。`,primary:"永久删除",secondary:null,primaryClass:"ghost",focus:"cancel",opener});return second==="primary"}
-async function permanentlyDeleteCard(card,options={}){const unsaved=Boolean(options.unsaved);if(!await confirmPermanentDelete(card,unsaved))return;try{await api("DELETE",`/api/cards/${card.id}/permanent`,versionPayload(card));if(options.fromEditor)await closeCardModal(true);await refresh(true);if(options.fromHistory)await doSearch();toast(`已永久删除“${card.title}”`)}catch(error){toast("永久删除失败："+error.message,true)}}
-async function permanentlyDeleteCurrentCard(){if(state.currentCardDraft)return closeCardModal();const card=currentCardForAction();if(card)await permanentlyDeleteCard(card,{fromEditor:true,unsaved:Boolean(isCardDirty())})}
-async function moveCurrentCard(direction){if(isManualReorderDisabled()){toast("请先清除筛选并恢复手动顺序",true);return}const card=state.cards.find(item=>item.id===state.currentCardId);if(!card)return;const selectedColumn=Number(document.getElementById("card-column").value);if(selectedColumn!==card.column_id&&["up","down"].includes(direction)){toast("请先保存所在列变更，再进行上移或下移",true);return}const decision=await confirmDirtyAction("移动");if(decision==="cancel")return;if(decision==="primary"&&!await saveCard())return;const current=state.cards.find(item=>item.id===card.id)||card,targetColumn=Number(document.getElementById("card-column").value||current.column_id),cards=state.cards.filter(item=>item.column_id===targetColumn).sort((a,b)=>a.position-b.position);let position=current.position;if(direction==="top")position=0;if(direction==="up")position=Math.max(0,position-1);if(direction==="down")position=Math.min(cards.length-1,position+1);if(direction==="bottom")position=cards.length-1;try{await api("PUT",`/api/cards/${current.id}/move`,{column_id:targetColumn,position,...versionPayload(current)});closeCardModal(true);await refresh(true);announce(`卡片 ${current.title} 已移动`)}catch(error){toast("移动失败："+error.message,true)}}
-function normalizedColumnName(value){return(value||"").trim().toLocaleLowerCase()}
-function duplicateColumnName(name,excludeId=null){const normalized=normalizedColumnName(name);return state.columns.some(column=>column.id!==excludeId&&normalizedColumnName(column.name)===normalized)}
-function configureColumnModal(column=null){currentColumnEdit=column;const editing=Boolean(column),title=editing?"重命名列":"新增列",input=document.getElementById("column-name"),close=document.getElementById("column-close-button"),save=document.getElementById("column-save-button");document.getElementById("column-modal-title").textContent=title;close.setAttribute("aria-label",`关闭${title}`);save.textContent=editing?"保存":"确定";input.value=column?.name||"";state.initialColumnName=input.value}
-function addColumn(){configureColumnModal();openModal("column-modal",document.activeElement,"column-name")}
-function renameColumn(column){configureColumnModal(column);openModal("column-modal",document.activeElement,"column-name");requestAnimationFrame(()=>document.getElementById("column-name").select())}
-async function closeColumnModal(force=false){const dirty=document.getElementById("column-name").value!==state.initialColumnName;if(!force&&dirty){const decision=await chooseAction({title:"放弃列名修改？",message:"列名尚未保存，关闭后本次修改将丢失。",primary:"放弃修改",secondary:null,danger:true,focus:"cancel"});if(decision!=="primary")return false}hideModal("column-modal");currentColumnEdit=null;return true}
-async function saveColumn(){const input=document.getElementById("column-name"),name=input.value.trim(),column=currentColumnEdit;if(!name){toast("列名不能为空",true);input.focus();return}if(duplicateColumnName(name,column?.id??null)){toast("列名已存在，请使用其他名称",true);input.focus();return}try{if(column)await api("PUT",`/api/columns/${column.id}`,{name,...versionPayload(column)});else await api("POST","/api/columns",{name,expected_board_revision:state.revision});state.initialColumnName=name;await closeColumnModal(true);await refresh(true);toast(column?"列已更新":"列已创建")}catch(error){toast((column?"更新失败：":"创建失败：")+error.message,true)}}
-async function deleteColumn(column){const count=state.cards.filter(card=>card.column_id===column.id).length,opener=document.activeElement,decision=await chooseAction({title:"删除列？",message:`你将删除列“${column.name}”。\n\n当前卡片：${count} 张\n这些卡片将移入历史归档，可在历史归档中恢复。`,primary:"删除列",secondary:null,primaryClass:"ghost",focus:"cancel",opener});if(decision!=="primary")return;try{await api("DELETE",`/api/columns/${column.id}`,versionPayload(column));await refresh(true);toast(`已删除列“${column.name}”`)}catch(error){toast("删除失败："+error.message,true)}}
-async function doSearch(loadMore=false){const from=document.getElementById("search-from"),to=document.getElementById("search-to"),button=document.querySelector(".history-search-btn"),box=document.getElementById("search-results"),meta=document.getElementById("search-meta");const createdFrom=document.getElementById("search-created-from"),createdTo=document.getElementById("search-created-to"),updatedFrom=document.getElementById("search-updated-from"),updatedTo=document.getElementById("search-updated-to");for(const[f,t,label]of[[from,to,"截止日期"],[createdFrom,createdTo,"创建日期"],[updatedFrom,updatedTo,"更新日期"]]){if(f.value&&t.value&&f.value>t.value){toast(`${label}：起始日期不能晚于结束日期`,true);f.focus();return}}if(!loadMore){state.searchAbort?.abort();state.searchAbort=new AbortController();state.searchCursor=null}const params=new URLSearchParams();[["q","search-q"],["priority","search-priority"],["from","search-from"],["to","search-to"],["created_from","search-created-from"],["created_to","search-created-to"],["updated_from","search-updated-from"],["updated_to","search-updated-to"]].forEach(([key,id])=>{const value=document.getElementById(id).value.trim();if(value)params.set(key,value)});params.set("sort",state.historySort);if(document.getElementById("search-all").checked)params.set("all","1");if(loadMore&&state.searchCursor)params.set("cursor",state.searchCursor);setBusy(button,true,loadMore?"加载中…":"搜索中…");box.setAttribute("aria-busy","true");try{const result=await api("GET","/api/search?"+params,undefined,{signal:state.searchAbort?.signal});state.searchCursor=result.next_cursor;if(!loadMore)clearChildren(box);result.items.forEach(card=>box.appendChild(renderResult(card)));box.querySelector(".search-load-more")?.remove();if(result.has_more){const more=document.createElement("button");more.type="button";more.className="ghost search-load-more";more.textContent="加载更多";more.onclick=()=>doSearch(true);box.appendChild(more)}meta.textContent=`已显示 ${box.querySelectorAll(".result-item").length} 条结果 · ${HISTORY_SORT_OPTIONS.get(state.historySort)}`;if(!result.items.length&&!loadMore)box.textContent="无匹配结果"}catch(error){if(error.name!=="AbortError"){meta.textContent="搜索失败";box.innerHTML='<div class="inline-error">搜索失败，请重试。</div>';toast("搜索失败："+error.message,true)}}finally{box.setAttribute("aria-busy","false");setBusy(button,false)}}
-function renderResult(card){const element=document.createElement("div");element.className="result-item priority-"+card.priority;const title=document.createElement("div");title.className="result-title";title.textContent=card.title+(card.archived?" [已归档]":"");element.appendChild(title);if(card.description){const description=document.createElement("div");description.className="result-desc";description.innerHTML=card.description;element.appendChild(description)}const meta=document.createElement("div");meta.className="result-meta";meta.textContent=[`优先级：${priorityLabel(card.priority)}`,card.labels&&`标签：${card.labels}`,card.due_date&&`截止：${card.due_date}`,card.attachment_count&&`附件：${card.attachment_count} 个`,card.column_name&&`原列：${card.column_name}${card.column_deleted?"（已删除）":""}`].filter(Boolean).join("　|　");element.appendChild(meta);const times=document.createElement("div");times.className="result-times";times.textContent=`创建：${fullTimestamp(card.created_at)} | 更新：${fullTimestamp(card.updated_at)}`;element.appendChild(times);if(card.attachment_count){const attachmentActions=document.createElement("div");attachmentActions.className="result-actions";const button=document.createElement("button");button.type="button";button.className="ghost";button.textContent="查看附件";button.setAttribute("aria-expanded","false");const box=document.createElement("div");box.className="history-attachments";box.hidden=true;button.onclick=()=>toggleResultAttachments(card,button,box);attachmentActions.appendChild(button);element.append(attachmentActions,box)}if(card.archived){const actions=document.createElement("div");actions.className="result-actions history-card-actions";if(card.column_deleted&&!card.restore_column_id){const label=document.createElement("label");label.className="restore-target-label";label.textContent="恢复到";const select=document.createElement("select");select.setAttribute("aria-label",`选择“${card.title}”的恢复列`);state.columns.slice().sort((a,b)=>a.position-b.position).forEach(column=>{const option=document.createElement("option");option.value=column.id;option.textContent=column.name;select.appendChild(option)});label.appendChild(select);const button=document.createElement("button");button.textContent="↩ 恢复";button.setAttribute("aria-label",`恢复卡片“${card.title}”`);button.onclick=()=>restoreCard(card,Number(select.value));actions.append(label,button)}else{const target=state.columns.find(column=>column.id===card.restore_column_id),button=document.createElement("button");button.textContent=`↩ 恢复到“${target?.name||card.column_name||"原列"}”`;button.setAttribute("aria-label",`恢复卡片“${card.title}”`);button.onclick=()=>restoreCard(card,card.restore_column_id||undefined);actions.appendChild(button)}const remove=document.createElement("button");remove.type="button";remove.className="icon-btn history-permanent-delete";remove.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg>';remove.title="永久删除卡片";remove.setAttribute("aria-label",`永久删除卡片“${card.title}”`);remove.onclick=()=>permanentlyDeleteCard(card,{fromHistory:true,unsaved:false});actions.appendChild(remove);element.appendChild(actions)}if(!card.archived){const actions=document.createElement("div");actions.className="result-actions history-card-actions";const remove=document.createElement("button");remove.type="button";remove.className="icon-btn history-permanent-delete";remove.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg>';remove.title="永久删除卡片";remove.setAttribute("aria-label",`永久删除卡片“${card.title}”`);remove.onclick=()=>permanentlyDeleteCard(card,{fromHistory:true,unsaved:false});actions.appendChild(remove);element.appendChild(actions)}return element}
-async function restoreCard(card,targetColumnId){const payload={expected_version:card.version,expected_board_revision:state.revision};if(targetColumnId)payload.target_column_id=targetColumnId;try{await api("POST",`/api/cards/${card.id}/restore`,payload);await refresh(true);await doSearch();const target=targetColumnId&&state.columns.find(column=>column.id===targetColumnId);toast(target?`已恢复到“${target.name}”`:"已恢复到原列")}catch(error){toast("恢复失败："+error.message,true)}}function resetSearch(){for(const id of["search-q","search-priority","search-from","search-to","search-created-from","search-created-to","search-updated-from","search-updated-to"])document.getElementById(id).value="";document.getElementById("search-all").checked=true;syncHistoryDateControl();clearChildren(document.getElementById("search-results"));document.getElementById("search-meta").textContent=""}
-function download(url){const anchor=document.createElement("a");anchor.href=url;document.body.appendChild(anchor);anchor.click();anchor.remove()}function downloadBlob(blob,fileName){const url=URL.createObjectURL(blob),anchor=document.createElement("a");anchor.href=url;anchor.download=fileName;document.body.appendChild(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}function responseFileName(response,fallback){const value=response.headers.get("Content-Disposition")||"",utf8=value.match(/filename\*=UTF-8''([^;]+)/i),plain=value.match(/filename="?([^";]+)"?/i);try{return decodeURIComponent(utf8?.[1]||plain?.[1]||fallback)}catch(_){return fallback}}function exportJson(){download("/api/export");toast("正在导出 JSON；附件文件不包含在内，完整迁移请使用 ZIP 备份。",{duration:5000})}function errorDetails(details){return Object.entries(details||{}).map(([key,value])=>`${key}：${Array.isArray(value)?value.slice(0,5).join("、")+(value.length>5?` 等 ${value.length} 项`:""):typeof value==="object"?JSON.stringify(value):value}`).join("\n")}function responseError(payload,fallback,incompleteNote=""){const error=payload?.error||{},missing=error.details?.missing_attachments;if(error.code==="INCOMPLETE_BACKUP"&&Array.isArray(missing)){const paths=missing.slice(0,5).join("\n");return `${error.message||fallback}\n缺失附件：${missing.length} 个${paths?`\n${paths}${missing.length>5?`\n另有 ${missing.length-5} 个未列出`:""}`:""}${incompleteNote?`\n${incompleteNote}`:""}`}const details=errorDetails(error.details);return `${error.message||fallback}${details?`\n${details}`:""}`}async function backupDb(){if(state.busyOperation)return;state.busyOperation="backup";document.body.setAttribute("aria-busy","true");toast("正在检查完整备份所需附件…",{duration:10000});try{const check=await fetch("/api/backup/check");if(!check.ok){const payload=await check.json().catch(()=>null);throw new Error(responseError(payload,`完整备份检查失败（HTTP ${check.status}）`,"未生成完整备份。"))}toast("正在生成完整 ZIP 备份…",{duration:15000});const response=await fetch("/api/backup");if(!response.ok){const payload=await response.json().catch(()=>null);throw new Error(responseError(payload,`完整备份生成失败（HTTP ${response.status}）`,"未生成完整备份。"))}const blob=await response.blob(),fileName=responseFileName(response,"kanban-backup.zip");downloadBlob(blob,fileName);toast("完整 ZIP 备份已生成并开始下载",{duration:8000})}catch(error){toast("备份失败："+error.message,true)}finally{state.busyOperation="";document.body.setAttribute("aria-busy","false")}}function selectImportFile(){document.getElementById("import-file").click()}async function importBackupFile(file){if(!file||state.busyOperation)return;state.busyOperation="import";document.body.setAttribute("aria-busy","true");try{if(file.name.toLowerCase().endsWith(".zip")||file.type==="application/zip"){toast("正在上传并校验完整备份…",{duration:10000});const response=await fetch("/api/import/zip/preview",{method:"POST",body:file}),preview=await response.json().catch(()=>null);if(!response.ok)throw new Error(responseError(preview,`备份预览失败（HTTP ${response.status}）`));if(!preview)throw new Error("备份预览响应格式无效");const message=`恢复将替换当前看板数据，操作前会自动创建一份完整 ZIP 备份。\n\n备份时间：${preview.created_at||"未知时间"}\n列：${preview.columns}\n活跃卡片：${preview.cards}\n历史归档：${preview.archived_cards}\n附件：${preview.attachments} 个\n附件总大小：${formatBytes(preview.attachment_size)}\n哈希校验：${preview.hash_verified?"已通过":"旧版备份未提供"}`,decision=await chooseAction({title:"恢复完整备份？",message,primary:"恢复完整备份",secondary:null,danger:true,focus:"cancel",opener:document.getElementById("import-button")});if(decision!=="primary")return;toast("正在恢复完整备份，请勿关闭页面…",{duration:15000});await api("POST","/api/import/zip",{token:preview.token,expected_board_revision:state.revision});await refresh(true);toast("完整备份恢复完成");return}toast("正在读取 JSON…",{duration:8000});const data=JSON.parse(await file.text()),preview=await api("POST","/api/import/preview",data),warning=preview.attachments_ignored?`JSON 中的 ${preview.attachments_ignored} 条附件信息不会导入，因为 JSON 不包含附件文件。`:"JSON 不包含附件文件。",message=`导入将替换当前看板数据，操作前会自动创建一份完整 ZIP 备份。\n\n列：${preview.columns}\n活跃卡片：${preview.cards}\n历史归档：${preview.archived_cards}\n\n${warning}`,decision=await chooseAction({title:"导入 JSON 并替换当前数据？",message,primary:"导入 JSON",secondary:null,danger:true,focus:"cancel",opener:document.getElementById("import-button")});if(decision!=="primary")return;toast("正在导入数据，请勿关闭页面…",{duration:15000});await api("POST","/api/import",{data,expected_board_revision:state.revision});await refresh(true);toast("JSON 导入完成")}catch(error){toast("导入失败："+error.message,true)}finally{state.busyOperation="";document.body.setAttribute("aria-busy","false");document.getElementById("import-file").value=""}}
-const DEFAULT_THEME="sea-salt-blue",THEMES=["sea-salt-blue","douban-green","swiss-mono","warm-paper","liquid-glass","deep-sea-night"],LEGACY_THEMES={"cloud-blue":"sea-salt-blue","navy-blue":"sea-salt-blue","aurora-blue":"sea-salt-blue","douban-classic":"douban-green","douban-modern":"douban-green","office":"swiss-mono","dark-tech":"deep-sea-night"};
-function normalizeTheme(value){const normalized=LEGACY_THEMES[value]||value;return THEMES.includes(normalized)?normalized:DEFAULT_THEME}
-function currentTheme(){return normalizeTheme(document.documentElement.dataset.theme)}
-function updateThemeMenu(){const selected=currentTheme();document.documentElement.dataset.theme=selected;document.querySelectorAll("[data-theme-value]").forEach(input=>input.checked=input.dataset.themeValue===selected)}
-function setTheme(theme){const normalized=normalizeTheme(theme);if(theme!==normalized&&!THEMES.includes(theme))return;document.documentElement.dataset.theme=normalized;try{localStorage.setItem("kanban-theme",normalized)}catch(_){}updateThemeMenu();announce("主题已切换")}function activeModal(){return[...document.querySelectorAll(".modal-overlay:not([hidden])")].pop()}function trapModalKey(event){const overlay=activeModal();if(!overlay||event.key!=="Tab")return;const focusable=[...overlay.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),[contenteditable="true"],[tabindex]:not([tabindex="-1"])')].filter(node=>!node.hidden&&node.offsetParent!==null);if(!focusable.length)return;const first=focusable[0],last=focusable[focusable.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}
-function setupStaticActions(){
-    document.querySelectorAll("[data-view]").forEach(button=>button.addEventListener("click",()=>{void showView(button.dataset.view)}));
-    document.getElementById("settings-button").addEventListener("click",()=>{void showView("settings")});
-    document.getElementById("settings-back-button").addEventListener("click",()=>{void showView("board")});
-    document.getElementById("import-button").addEventListener("click",selectImportFile);
-    document.getElementById("export-button").addEventListener("click",exportJson);
-    document.getElementById("backup-button").addEventListener("click",backupDb);
-    document.querySelectorAll("[data-theme-value]").forEach(input=>input.addEventListener("change",()=>{if(input.checked)setTheme(input.dataset.themeValue)}));
-    document.querySelectorAll('input[name="card-description-display"]').forEach(input=>input.addEventListener("change",()=>{if(input.checked)setCardDescriptionDisplay(input.value)}));
-    document.getElementById("add-column-button").addEventListener("click",addColumn);
-    document.getElementById("clear-filters").addEventListener("click",clearBoardFilters);
-    document.getElementById("search-q").addEventListener("keydown",event=>{if(event.key==="Enter")doSearch()});
-    document.getElementById("search-from-trigger").addEventListener("click",event=>openDateTimePicker("search-from",event.currentTarget));
-    document.getElementById("search-to-trigger").addEventListener("click",event=>openDateTimePicker("search-to",event.currentTarget));
-    document.getElementById("search-from").addEventListener("input",()=>syncHistoryDateControl("from"));
-    document.getElementById("search-to").addEventListener("input",()=>syncHistoryDateControl("to"));
-    document.getElementById("search-from-clear").addEventListener("click",()=>clearHistoryDate("from"));
-    document.getElementById("search-to-clear").addEventListener("click",()=>clearHistoryDate("to"));
-    document.getElementById("search-created-from-trigger").addEventListener("click",event=>openDateTimePicker("search-created-from",event.currentTarget));
-    document.getElementById("search-created-to-trigger").addEventListener("click",event=>openDateTimePicker("search-created-to",event.currentTarget));
-    document.getElementById("search-created-from").addEventListener("input",()=>syncHistoryDateControl("created_from"));
-    document.getElementById("search-created-to").addEventListener("input",()=>syncHistoryDateControl("created_to"));
-    document.getElementById("search-created-from-clear").addEventListener("click",()=>clearHistoryDate("created_from"));
-    document.getElementById("search-created-to-clear").addEventListener("click",()=>clearHistoryDate("created_to"));
-    document.getElementById("search-updated-from-trigger").addEventListener("click",event=>openDateTimePicker("search-updated-from",event.currentTarget));
-    document.getElementById("search-updated-to-trigger").addEventListener("click",event=>openDateTimePicker("search-updated-to",event.currentTarget));
-    document.getElementById("search-updated-from").addEventListener("input",()=>syncHistoryDateControl("updated_from"));
-    document.getElementById("search-updated-to").addEventListener("input",()=>syncHistoryDateControl("updated_to"));
-    document.getElementById("search-updated-from-clear").addEventListener("click",()=>clearHistoryDate("updated_from"));
-    document.getElementById("search-updated-to-clear").addEventListener("click",()=>clearHistoryDate("updated_to"));
-    document.getElementById("history-sort-button").addEventListener("click",toggleHistorySort);
-    document.querySelector(".history-search-btn").addEventListener("click",()=>doSearch());
-    document.getElementById("card-archive-button").addEventListener("click",archiveCurrentCard);
-    document.getElementById("card-permanent-delete-button").addEventListener("click",permanentlyDeleteCurrentCard);
-    document.getElementById("card-close-button").addEventListener("click",()=>closeCardModal());
-    document.getElementById("card-date-trigger").addEventListener("click",event=>openDateTimePicker("card-due",event.currentTarget));
-    document.getElementById("card-due").addEventListener("input",syncCardDateControl);
-    document.getElementById("card-date-clear").addEventListener("click",clearCardDate);
-    document.getElementById("card-time-trigger").addEventListener("click",event=>openDateTimePicker("card-due-time",event.currentTarget));
-    document.getElementById("card-due-time").addEventListener("input",syncCardTimeControl);
-    document.getElementById("card-time-clear").addEventListener("click",clearCardTime);
-    document.querySelectorAll("[data-move-direction]").forEach(button=>button.addEventListener("click",()=>moveCurrentCard(button.dataset.moveDirection)));
-    document.getElementById("attachment-add-button").addEventListener("click",selectAttachments);
-    document.getElementById("card-cancel-button").addEventListener("click",()=>closeCardModal());
-    document.querySelector(".card-save-btn").addEventListener("click",saveCard);
-    document.getElementById("column-close-button").addEventListener("click",()=>closeColumnModal());
-    document.getElementById("column-cancel-button").addEventListener("click",()=>closeColumnModal());
-    document.getElementById("column-save-button").addEventListener("click",saveColumn);
+import {
+    state, hasActiveFilters, isManualReorderDisabled
+} from "./js/state.js";
+import {
+    api, versionPayload as makeVersionPayload
+} from "./js/api.js";
+import {
+    toast, announce, formatBytes, setBusy, clearChildren, openModal as showModal, hideModal as dismissModal, chooseAction, setupButtonTooltips
+} from "./js/ui.js";
+import {
+    localDateKey, addLocalDays, timestampLocalDateKey, dueDatePart, isToday, isOverdue, isTomorrow, calendarDayNumber, dueClass, splitDue, joinDue, dueDisplay, dueCountdown, dueSortTimestamp, parseLocalTimestamp, fullTimestamp, compactCreatedTime, openDateTimePicker, syncCardDateControl, syncCardTimeControl, clearCardDate, clearCardTime, syncHistoryDateControl, clearHistoryDate
+} from "./js/dates.js";
+let drag = {
+    cardId: null, sourceColId: null
+}, cardDragPreview = null, colDrag = {
+    colId: null, colEl: null
+},
+openSortColumnId = null, historySortOpen = false, openThemedSelect = null, openTodayDueDialog = null, autoArchiveTooltipTimer = null, autoArchiveTooltip = null, currentColumnEdit = null;
+const SORT_OPTIONS = new Map([["position", "手动顺序"],["updated_desc", "最近更新"],["updated_asc", "最早更新"],["created_desc", "最新创建"],["created_asc", "最早创建"],["due_desc", "最晚截止"],["due_asc", "最早截止"]]), SORT_STORAGE_KEY = "kanban-column-sorts";
+const HISTORY_SORT_OPTIONS = new Map([["archived_desc", "最近归档"],["archived_asc", "最早归档"],["updated_desc", "最近更新"],["updated_asc", "最早更新"],["created_desc", "最新创建"],["created_asc", "最早创建"]]), HISTORY_SORT_STORAGE_KEY = "kanban-history-sort";
+const CARD_DESCRIPTION_OPTIONS = new Map([["none", "不展示"],["one-line", "展示一行"],["two-lines", "展示两行"],["full", "全展示"]]), CARD_DESCRIPTION_STORAGE_KEY = "kanban-card-description-display";
+function columnSort(columnId){
+    const value = state.sortByColumn[String(columnId)];
+    return SORT_OPTIONS.has(value) ? value: "position"
 }
-
-document.addEventListener("DOMContentLoaded",()=>{setupButtonTooltips();loadSortPreferences();loadHistorySortPreference();loadCardDescriptionPreference();renderHistorySort();renderCardDescriptionPreference();updateThemeMenu();setupViewTabs();setupStaticActions();refresh(true);setupBoardColumnDrop();setupEditorToolbar();document.getElementById("import-file").addEventListener("change",event=>importBackupFile(event.target.files[0]));document.getElementById("attachment-input").addEventListener("change",event=>queueAttachments(event.target.files));document.getElementById("search-from").addEventListener("change",()=>syncHistoryDateControl("from"));document.getElementById("search-to").addEventListener("change",()=>syncHistoryDateControl("to"));document.getElementById("search-created-from").addEventListener("change",()=>syncHistoryDateControl("created_from"));document.getElementById("search-created-to").addEventListener("change",()=>syncHistoryDateControl("created_to"));document.getElementById("search-updated-from").addEventListener("change",()=>syncHistoryDateControl("updated_from"));document.getElementById("search-updated-to").addEventListener("change",()=>syncHistoryDateControl("updated_to"));syncHistoryDateControl();document.addEventListener("click",event=>{if(!event.target.closest(".history-sort" )&&historySortOpen){historySortOpen=false;renderHistorySort()}if(!event.target.closest(".column-sort-button")&&!event.target.closest(".column-sort-menu")&&openSortColumnId!==null){openSortColumnId=null;renderBoard()}if(state.quickCreate.columnId!==null&&!event.target.closest(".quick-card-form")&&!event.target.closest(".add-card-btn")){state.quickCreate={columnId:null,title:"",submitting:false};renderBoard()}});document.addEventListener("keydown",event=>{trapModalKey(event);if((event.ctrlKey||event.metaKey)&&event.key==="Enter"&&!event.isComposing&&!document.getElementById("card-modal").hidden){event.preventDefault();saveCard()}if(event.key==="Escape"&&!event.isComposing){if(!document.getElementById("choice-modal").hidden){document.getElementById("choice-cancel").click();return}if(historySortOpen){historySortOpen=false;renderHistorySort();document.getElementById("history-sort-button").focus();return}if(openSortColumnId!==null){const columnId=openSortColumnId;openSortColumnId=null;renderBoard();requestAnimationFrame(()=>document.querySelector(`.column[data-col-id="${columnId}"] .column-sort-button`)?.focus());return}if(!document.getElementById("card-modal").hidden)closeCardModal();else if(!document.getElementById("column-modal").hidden)closeColumnModal()}});window.addEventListener("beforeunload",event=>{if(state.busyOperation||isCardDirty()||attachmentWorkPending()||(!document.getElementById("column-modal").hidden&&document.getElementById("column-name").value!==state.initialColumnName)){event.preventDefault();event.returnValue=""}})});
+function loadSortPreferences(){
+    try {
+        const values = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) || "{}");
+        if (values && typeof values === "object" &&!Array.isArray(values)) for (const [columnId, value] of Object.entries(values)) if (SORT_OPTIONS.has(value)) state.sortByColumn[columnId] = value
+    } catch (_){
+        state.sortByColumn = {}
+    }
+}
+function saveSortPreferences(){
+    try {
+        const columnIds = new Set(state.columns.map(column => String(column.id))), values = {};
+        for (const [columnId, value] of Object.entries(state.sortByColumn)) if (columnIds.has(columnId) && SORT_OPTIONS.has(value) && value !== "position") values[columnId] = value;
+        state.sortByColumn = values;
+        localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(values));
+        localStorage.removeItem("kanban-card-sort")
+    } catch (_){}
+}
+function loadHistorySortPreference(){
+    try {
+        const value = localStorage.getItem(HISTORY_SORT_STORAGE_KEY);
+        state.historySort = HISTORY_SORT_OPTIONS.has(value) ? value: "archived_desc"
+    } catch (_){
+        state.historySort = "archived_desc"
+    }
+}
+function saveHistorySortPreference(){
+    try {
+        localStorage.setItem(HISTORY_SORT_STORAGE_KEY, state.historySort)
+    } catch (_){}
+}
+function loadCardDescriptionPreference(){
+    try {
+        const value = localStorage.getItem(CARD_DESCRIPTION_STORAGE_KEY);
+        state.cardDescriptionDisplay = CARD_DESCRIPTION_OPTIONS.has(value) ? value: "two-lines"
+    } catch (_){
+        state.cardDescriptionDisplay = "two-lines"
+    }
+}
+function saveCardDescriptionPreference(){
+    try {
+        localStorage.setItem(CARD_DESCRIPTION_STORAGE_KEY, state.cardDescriptionDisplay)
+    } catch (_){}
+}
+function renderCardDescriptionPreference(){
+    document.querySelectorAll('input[name="card-description-display"]').forEach(input => input.checked = input.value === state.cardDescriptionDisplay)
+}
+function setCardDescriptionDisplay(value){
+    if (!CARD_DESCRIPTION_OPTIONS.has(value)) return;
+    state.cardDescriptionDisplay = value;
+    saveCardDescriptionPreference();
+    renderCardDescriptionPreference();
+    renderBoard();
+    announce(`看板卡片描述已设为${CARD_DESCRIPTION_OPTIONS.get(value)}`)
+}
+function renderHistorySort(){
+    const button = document.getElementById("history-sort-button"), menu = document.getElementById("history-sort-menu"), label = document.getElementById("history-sort-label"), current = HISTORY_SORT_OPTIONS.has(state.historySort) ? state.historySort: "archived_desc";
+    state.historySort = current;
+    label.textContent = HISTORY_SORT_OPTIONS.get(current);
+    button.setAttribute("aria-label", `历史卡片排序，当前：${HISTORY_SORT_OPTIONS.get(current)}`);
+    button.setAttribute("aria-expanded", String(historySortOpen));
+    menu.hidden =!historySortOpen;
+    clearChildren(menu);
+    for (const [value, text] of HISTORY_SORT_OPTIONS){
+        const item = document.createElement("button"), active = value === current;
+        item.type = "button";
+        item.setAttribute("role", "menuitemradio");
+        item.setAttribute("aria-checked", String(active));
+        item.dataset.historySortValue = value;
+        item.innerHTML = `<span class="sort-menu-check" aria-hidden="true">${active?"✓":""}</span><span>${text}</span>`;
+        item.onclick = event => {
+            event.stopPropagation();
+            state.historySort = value;
+            saveHistorySortPreference();
+            historySortOpen = false;
+            renderHistorySort();
+            state.searchAbort?.abort();
+            state.searchCursor = null;
+            doSearch();
+            announce(`历史卡片已按${text}排序`)
+        };
+        menu.appendChild(item)
+    }
+    menu.onkeydown = event => {
+        const items =[...menu.querySelectorAll("button")], index = items.indexOf(document.activeElement);
+        let next = index;
+        if (event.key === "ArrowDown") next =(index + 1) % items.length;
+        else if (event.key === "ArrowUp") next =(index - 1 + items.length) % items.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = items.length - 1;
+        else if (event.key === "Escape"){
+            event.preventDefault();
+            historySortOpen = false;
+            renderHistorySort();
+            button.focus();
+            return
+        } else
+        return;
+        event.preventDefault();
+        items[next].focus()
+    }
+}
+function toggleHistorySort(event){
+    event.stopPropagation();
+    historySortOpen =!historySortOpen;
+    renderHistorySort();
+    if (historySortOpen) requestAnimationFrame(() => document.querySelector('#history-sort-menu button[aria-checked="true"]')?.focus())
+}
+function sortCards(cards, columnId){
+    const sort = columnSort(columnId);
+    if (sort === "position") return cards.slice().sort((a, b) => a.position - b.position || a.id - b.id);
+    const dueSort = sort.startsWith("due"), field = sort.startsWith("created") ? "created_at": "updated_at", descending = sort.endsWith("desc");
+    return cards.slice().sort((a, b) => {
+        const left = dueSort ? dueSortTimestamp(a.due_date): parseLocalTimestamp(a[field])?.getTime(), right = dueSort ? dueSortTimestamp(b.due_date): parseLocalTimestamp(b[field])?.getTime(); if (left == null && right == null) return a.position - b.position || a.id - b.id; if (left == null) return 1; if (right == null) return - 1; if (left !== right) return descending ? right - left: left - right; return a.position - b.position || a.id - b.id
+    })
+}
+function versionPayload(item){
+    return makeVersionPayload(item, state.revision)
+}
+function attachmentWorkPending(){
+    return state.attachmentQueue.some(item =>["waiting", "uploading", "processing"].includes(item.status))
+}
+function resetAttachmentState(){
+    state.attachmentAbort?.abort();
+    state.attachmentAbort = null;
+    state.attachments =[];
+    state.attachmentQueue.forEach(item => item.xhr?.abort());
+    state.attachmentQueue =[];
+    state.uploading = false;
+    renderAttachments()
+}
+function selectAttachments(){
+    document.getElementById("attachment-input").click()
+}
+async function loadAttachments(cardId = state.currentCardId){
+    if (!cardId) return;
+    state.attachmentAbort?.abort();
+    const controller = new AbortController();
+    state.attachmentAbort = controller;
+    try {
+        const items = await api("GET", `/api/cards/${cardId}/attachments`, undefined, {
+            signal: controller.signal
+        });
+        if (cardId !== state.currentCardId) return;
+        state.attachments = items;
+        renderAttachments()
+    } catch (error){
+        if (error.name !== "AbortError") toast("附件加载失败：" + error.message, true)
+    }
+}
+function renderAttachments(){
+    const list = document.getElementById("attachment-list"), queue = document.getElementById("attachment-queue");
+    if (!list ||!queue) return;
+    clearChildren(list);
+    state.attachments.forEach(item => {
+        const row = document.createElement("div"); row.className = "attachment-item" +(item.file_missing ? " attachment-missing": ""); const main = document.createElement("div"); main.className = "attachment-main"; const name = document.createElement("div"); name.className = "attachment-name"; name.textContent = item.file_name; const meta = document.createElement("div"); meta.className = "attachment-meta"; meta.textContent = item.file_missing ? "附件文件已不存在": `${formatBytes(item.size)}　更新于 ${item.updated_at}`; main.append(name, meta); const actions = document.createElement("div"); actions.className = "attachment-actions"; if (!item.file_missing){
+            const down = document.createElement("button"); down.type = "button"; down.className = "ghost"; down.textContent = "下载"; down.setAttribute("aria-label", `下载附件 ${item.file_name}`); down.onclick =() => download(`/api/attachments/${item.id}/download`); actions.appendChild(down)
+        }
+        if (!document.getElementById("card-modal").hidden){
+            const remove = document.createElement("button"); remove.type = "button"; remove.className = "ghost danger-text"; remove.textContent = item.file_missing ? "清理记录": "删除"; remove.setAttribute("aria-label", `${remove.textContent}附件 ${item.file_name}`); remove.onclick =() => deleteAttachment(item); actions.appendChild(remove)
+        }
+        row.append(main, actions); list.appendChild(row)
+    });
+    clearChildren(queue);
+    state.attachmentQueue.forEach(item => {
+        const row = document.createElement("div"); row.className = "attachment-item attachment-queued"; const main = document.createElement("div"); main.className = "attachment-main"; const name = document.createElement("div"); name.className = "attachment-name"; name.textContent = item.file.name; const status = document.createElement("div"); status.className = "attachment-meta"; status.textContent = item.status === "waiting" ? "等待上传": item.status === "uploading" ? `上传中 ${item.progress}%`: item.status === "processing" ? "处理中…": item.status === "done" ? "已完成": item.status === "cancelled" ? "已取消": `上传失败：${item.error||"未知错误"}`; main.append(name, status); if (item.status === "uploading"){
+            const progress = document.createElement("div"); progress.className = "attachment-progress"; progress.setAttribute("role", "progressbar"); progress.setAttribute("aria-label", `${item.file.name} 上传进度`); progress.setAttribute("aria-valuemin", "0"); progress.setAttribute("aria-valuemax", "100"); progress.setAttribute("aria-valuenow", String(item.progress)); const bar = document.createElement("span"); bar.style.width = item.progress + "%"; progress.appendChild(bar); main.appendChild(progress)
+        }
+        const actions = document.createElement("div"); actions.className = "attachment-actions"; if (item.status === "failed"){
+            const retry = document.createElement("button"); retry.type = "button"; retry.className = "ghost"; retry.textContent = "重试"; retry.onclick =() => {
+                item.status = "waiting"; item.error = ""; processAttachmentQueue()
+            };
+            actions.appendChild(retry)
+        }
+        if (["waiting", "uploading"].includes(item.status)){
+            const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "ghost"; cancel.textContent = "取消"; cancel.onclick =() => {
+                item.status = "cancelled"; item.xhr?.abort(); renderAttachments()
+            };
+            actions.appendChild(cancel)
+        }
+        row.append(main, actions); queue.appendChild(row)
+    })
+}
+function uploadAttachment(item, replace = false, version = null){
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest(), query = replace ? "?replace=1": ""; item.xhr = xhr; xhr.open("POST", `/api/cards/${state.currentCardId}/attachments${query}`); xhr.setRequestHeader("X-File-Name", encodeURIComponent(item.file.name)); xhr.setRequestHeader("X-File-Type", item.file.type || ""); if (version != null) xhr.setRequestHeader("X-Attachment-Version", String(version)); xhr.upload.onprogress = event => {
+            if (event.lengthComputable){
+                item.status = "uploading"; item.progress = Math.round(event.loaded / event.total * 100); renderAttachments()
+            }
+        };
+        xhr.upload.onload =() => {
+            item.status = "processing"; renderAttachments()
+        };
+        xhr.onerror =() => reject(new Error("网络错误")); xhr.onabort =() => reject(Object.assign(new Error("已取消"), {
+            code: "ABORTED"
+        })
+        ); xhr.onload =() => {
+            let data = {}; try {
+                data = xhr.responseText ? JSON.parse(xhr.responseText): {}
+            } catch (_){}
+            if (xhr.status >= 200 && xhr.status < 300) resolve(data); else {
+                const value = data.error || {}, error = new Error(value.message || `请求失败 (${xhr.status})`); error.code = value.code; error.details = value.details; reject(error)
+            }
+        };
+        xhr.send(item.file)
+    })
+}
+async function processAttachmentQueue(){
+    if (state.uploading ||!state.currentCardId) return;
+    state.uploading = true;
+    try {
+        for (const item of state.attachmentQueue){
+            if (item.status !== "waiting") continue;
+            try {
+                let attachment;
+                try {
+                    attachment = await uploadAttachment(item)
+                } catch (error){
+                    if (error.code !== "ATTACHMENT_EXISTS") throw error;
+                    const old = error.details?.attachment;
+                    if (!old){
+                        item.status = "cancelled";
+                        renderAttachments();
+                        continue
+                    }
+                    const overwrite = await chooseAction({
+                        title: "覆盖同名附件？", message: `附件“${item.file.name}”已经存在。\n\n现有文件更新时间：${old.updated_at}\n现有文件大小：${formatBytes(old.size)}\n新文件大小：${formatBytes(item.file.size)}`, primary: "覆盖附件", secondary: null, danger: true, focus: "cancel"
+                    });
+                    if (overwrite !== "primary"){
+                        item.status = "cancelled";
+                        renderAttachments();
+                        continue
+                    }
+                    attachment = await uploadAttachment(item, true, old.version)
+                }
+                item.status = "done";
+                state.attachments = state.attachments.filter(value => value.id !== attachment.id);
+                state.attachments.push(attachment);
+                state.attachments.sort((a, b) => a.id - b.id);
+                const card = state.cards.find(value => value.id === state.currentCardId);
+                if (card) card.attachment_count = state.attachments.length;
+                renderAttachments();
+                renderBoard();
+                setTimeout(() => {
+                    state.attachmentQueue = state.attachmentQueue.filter(value => value.id !== item.id); renderAttachments()
+                },
+                1500)
+            } catch (error){
+                if (error.code === "ABORTED"){
+                    item.status = "cancelled"
+                } else {
+                    item.status = "failed";
+                    item.error = error.code === "ATTACHMENT_VERSION_CONFLICT" ? "附件已在其他页面被更新，请重新确认后再覆盖。": error.message;
+                    if (error.code === "ATTACHMENT_VERSION_CONFLICT") await loadAttachments()
+                }
+                renderAttachments()
+            }
+        }
+    } finally {
+        state.uploading = false;
+        if (!attachmentWorkPending() &&!state.currentCardDraft){
+            document.getElementById("card-meta").textContent = "卡片和附件均已保存";
+            announce("卡片和附件均已保存")
+        }
+    }
+}
+function queueAttachments(files){
+    for (const file of files) state.attachmentQueue.push({
+        id: crypto.randomUUID ? crypto.randomUUID(): String(Date.now() + Math.random()), file, status: "waiting", progress: 0, error: "", xhr: null
+    });
+    document.getElementById("attachment-input").value = "";
+    renderAttachments();
+    processAttachmentQueue()
+}
+async function deleteAttachment(item){
+    const decision = await chooseAction({
+        title: "删除附件？", message: `附件“${item.file_name}”将被永久删除，且无法从历史归档中恢复。`, primary: "删除附件", secondary: null, danger: true, focus: "cancel"
+    });
+    if (decision !== "primary") return;
+    try {
+        const response = await fetch(`/api/attachments/${item.id}`, {
+            method: "DELETE", headers: {
+                "X-Attachment-Version": String(item.version)
+            }
+        })
+        , data = await response.json();
+        if (!response.ok){
+            const error = new Error(data.error?.message || "删除失败");
+            error.code = data.error?.code;
+            throw error
+        }
+        state.attachments = state.attachments.filter(value => value.id !== item.id);
+        const card = state.cards.find(value => value.id === state.currentCardId);
+        if (card) card.attachment_count = state.attachments.length;
+        renderAttachments();
+        renderBoard()
+    } catch (error){
+        toast("删除附件失败：" + error.message, true)
+    }
+}
+async function toggleResultAttachments(card, button, box){
+    const opening = box.hidden;
+    if (!opening){
+        box.hidden = true;
+        button.setAttribute("aria-expanded", "false");
+        return
+    }
+    try {
+        const items = await api("GET", `/api/cards/${card.id}/attachments`);
+        clearChildren(box);
+        items.forEach(item => {
+            const row = document.createElement("div"); row.className = "history-attachment"; const text = document.createElement("span"); text.textContent = `${item.file_name}　${formatBytes(item.size)}`; const down = document.createElement("button"); down.type = "button"; down.className = "ghost"; down.textContent = "下载"; down.disabled = item.file_missing; down.onclick =() => download(`/api/attachments/${item.id}/download`); row.append(text, down); box.appendChild(row)
+        });
+        box.hidden = false;
+        button.setAttribute("aria-expanded", "true")
+    } catch (error){
+        toast("附件加载失败：" + error.message, true)
+    }
+}
+const RICH_TEXT_COLORS = {
+    fg: new Set(["red", "yellow", "green", "blue", "purple"]), bg: new Set(["red", "yellow", "green", "blue", "purple"])
+};
+let openColorMenu = null, savedColorRange = null;
+function colorFamily(kind){
+    return kind === "fg" ? "rt-fg-": "rt-bg-"
+}
+function selectionInEditor(range){
+    const editor = document.getElementById("card-description"), container = range?.commonAncestorContainer;
+    return!!range &&!range.collapsed && editor.contains(container.nodeType === Node.ELEMENT_NODE ? container: container.parentNode)
+}
+function colorClasses(node, kind){
+    const prefix = colorFamily(kind);
+    return node.nodeType === Node.ELEMENT_NODE ?[...node.classList].filter(value => value.startsWith(prefix)):[]
+}
+function unwrapSpan(span){
+    const parent = span.parentNode;
+    while (span.firstChild) parent.insertBefore(span.firstChild, span);
+    span.remove();
+    return parent
+}
+function normalizeColorDom(root){
+    let changed = true;
+    while (changed){
+        changed = false;
+        root.querySelectorAll("span").forEach(span => {
+            if (!span.isConnected) return; if (!span.classList.length &&!span.attributes.length){
+                unwrapSpan(span); changed = true; return
+            }
+            const parent = span.parentElement; if (parent?.tagName === "SPAN" &&!span.classList.contains("rt-checkbox") &&!span.classList.contains("rt-checkbox-checked") && parent.className === span.className && span.attributes.length === 1 && parent.attributes.length === 1){
+                while (span.firstChild) parent.insertBefore(span.firstChild, span); span.remove(); changed = true
+            }
+        });
+        root.querySelectorAll("span").forEach(span => {
+            let next = span.nextSibling; while (next?.nodeType === Node.TEXT_NODE &&!next.data) next = next.nextSibling; if (next?.nodeType === Node.ELEMENT_NODE && next.tagName === "SPAN" &&!span.classList.contains("rt-checkbox") &&!span.classList.contains("rt-checkbox-checked") && next.className === span.className && span.attributes.length === 1 && next.attributes.length === 1){
+                while (next.firstChild) span.appendChild(next.firstChild); next.remove(); changed = true
+            }
+        })
+    }
+    root.normalize()
+}
+function splitRangeBoundaries(range){
+    for (const boundary of ["end", "start"]){
+        const container = boundary === "start" ? range.startContainer: range.endContainer, offset = boundary === "start" ? range.startOffset: range.endOffset;
+        if (container.nodeType !== Node.TEXT_NODE) continue;
+        if (offset > 0 && offset < container.data.length){
+            const after = container.splitText(offset);
+            if (boundary === "start") range.setStart(after, 0);
+            else range.setEnd(container, container.data.length)
+        }
+    }
+}
+function removeColorFromFragment(root, kind){
+    root.querySelectorAll("span").forEach(span => {
+        for (const value of colorClasses(span, kind)) span.classList.remove(value); if (!span.classList.length) unwrapSpan(span)
+    })
+}
+function wrapUncoloredText(root, kind, className){
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes =[];
+    while (walker.nextNode()) if (walker.currentNode.data) nodes.push(walker.currentNode);
+    nodes.forEach(node => {
+        let parent = node.parentElement, hasFamily = false; while (parent && parent !== root){
+            if (colorClasses(parent, kind).length){
+                hasFamily = true; break
+            }
+            parent = parent.parentElement
+        }
+        if (hasFamily) return; const span = document.createElement("span"); span.className = className; node.parentNode.insertBefore(span, node); span.appendChild(node)
+    })
+}
+function closeColorMenu(restoreFocus = false){
+    if (!openColorMenu) return;
+    const menu = document.getElementById(openColorMenu + "-color-menu"), button = document.getElementById(openColorMenu + "-color-button");
+    menu.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    openColorMenu = null;
+    if (restoreFocus) button.focus()
+}
+function toggleColorMenu(kind){
+    const key = kind === "fg" ? "text": "highlight", menu = document.getElementById(key + "-color-menu"), button = document.getElementById(key + "-color-button"), opening = openColorMenu !== key, selection = window.getSelection();
+    if (selection?.rangeCount && selectionInEditor(selection.getRangeAt(0))) savedColorRange = selection.getRangeAt(0).cloneRange();
+    closeColorMenu();
+    if (!opening) return;
+    openColorMenu = key;
+    menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    requestAnimationFrame(() => menu.querySelector("button")?.focus())
+}
+function applyDescriptionColor(kind, value){
+    if (!RICH_TEXT_COLORS[kind]?.has(value) && value !== "") return;
+    const selection = window.getSelection(), range = savedColorRange, editor = document.getElementById("card-description");
+    if (!selectionInEditor(range)){
+        toast("请先选择文字", true);
+        savedColorRange = null;
+        closeColorMenu(true);
+        return
+    }
+    splitRangeBoundaries(range);
+    const fragment = range.extractContents();
+    removeColorFromFragment(fragment, kind);
+    if (value) wrapUncoloredText(fragment, kind, colorFamily(kind) + value);
+    const marker = document.createElement("span");
+    marker.dataset.colorMarker = "";
+    range.insertNode(marker);
+    marker.before(fragment);
+    normalizeColorDom(editor);
+    const caret = document.createRange();
+    caret.setStartAfter(marker);
+    caret.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(caret);
+    marker.remove();
+    savedColorRange = null;
+    closeColorMenu(true);
+    editor.focus();
+    announce(value ? "已应用文字颜色": "已清除文字颜色")
+}
+function setupColorMenus(){
+    for (const [kind, key] of [["fg", "text"],["bg", "highlight"]]){
+        const button = document.getElementById(key + "-color-button"), menu = document.getElementById(key + "-color-menu");
+        button.addEventListener("mousedown", event => event.preventDefault());
+        button.addEventListener("click",() => toggleColorMenu(kind));
+        menu.addEventListener("mousedown", event => {
+            if (event.target.closest("button")) event.preventDefault()
+        });
+        menu.addEventListener("click", event => {
+            const item = event.target.closest("button[data-color-value]"); if (item) applyDescriptionColor(kind, item.dataset.colorValue)
+        });
+        menu.addEventListener("keydown", event => {
+            const items =[...menu.querySelectorAll("button")], index = items.indexOf(document.activeElement); let next = index; if (event.key === "ArrowDown" || event.key === "ArrowRight") next =(index + 1) % items.length; else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next =(index - 1 + items.length) % items.length; else if (event.key === "Home") next = 0; else if (event.key === "End") next = items.length - 1; else if (event.key === "Escape"){
+                event.preventDefault(); closeColorMenu(true); return
+            } else
+            return; event.preventDefault(); items[next].focus()
+        })
+    }
+}
+function hydrateDescriptionCheckboxes(root = document.getElementById("card-description")){
+    root.querySelectorAll(".rt-checkbox,.rt-checkbox-checked").forEach(checkbox => {
+        const checked = checkbox.classList.contains("rt-checkbox-checked"); checkbox.className = checked ? "rt-checkbox-checked": "rt-checkbox"; checkbox.textContent = checked ? "☑": "☐"; checkbox.setAttribute("contenteditable", "false"); checkbox.setAttribute("role", "checkbox"); checkbox.setAttribute("aria-checked", String(checked))
+    })
+}
+function hydrateDescriptionHtml(html){
+    const temp = document.createElement("div");
+    temp.innerHTML = html || "";
+    hydrateDescriptionCheckboxes(temp);
+    return temp.innerHTML
+}
+function insertDescriptionCheckbox(){
+    const editor = document.getElementById("card-description"), selection = window.getSelection();
+    editor.focus();
+    let range = selection?.rangeCount ? selection.getRangeAt(0): null;
+    if (!range ||!editor.contains(range.commonAncestorContainer)){
+        range = document.createRange();
+        range.selectNodeContents(editor);
+        range.collapse(false)
+    }
+    const checkbox = document.createElement("span");
+    checkbox.className = "rt-checkbox";
+    checkbox.textContent = "☐";
+    checkbox.setAttribute("contenteditable", "false");
+    checkbox.setAttribute("role", "checkbox");
+    checkbox.setAttribute("aria-checked", "false");
+    range.deleteContents();
+    range.insertNode(checkbox);
+    const space = document.createTextNode(" ");
+    checkbox.after(space);
+    range.setStartAfter(space);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    editor.dispatchEvent(new Event("input", {
+        bubbles: true
+    })
+    )
+}
+function toggleDescriptionCheckbox(checkbox){
+    const checked = checkbox.classList.toggle("rt-checkbox-checked");
+    checkbox.classList.toggle("rt-checkbox",!checked);
+    checkbox.textContent = checked ? "☑": "☐";
+    checkbox.setAttribute("aria-checked", String(checked));
+    document.getElementById("card-description").dispatchEvent(new Event("input", {
+        bubbles: true
+    })
+    )
+}
+function setupDescriptionCheckboxes(){
+    const editor = document.getElementById("card-description"), findCheckbox = event => event.target.nodeType === Node.ELEMENT_NODE ? event.target.closest(".rt-checkbox,.rt-checkbox-checked"): event.target.parentElement?.closest(".rt-checkbox,.rt-checkbox-checked");
+    editor.addEventListener("pointerdown", event => {
+        const checkbox = findCheckbox(event); if (checkbox && editor.contains(checkbox)){
+            event.preventDefault(); event.stopPropagation(); toggleDescriptionCheckbox(checkbox)
+        }
+    },
+    true)
+}
+function setupEditorToolbar(){
+    const toolbar = document.getElementById("editor-toolbar"), run = button => document.execCommand(button.dataset.cmd, false, null);
+    toolbar.addEventListener("mousedown", event => {
+        const button = event.target.closest("button[data-cmd],button[data-action]"); if (button){
+            event.preventDefault(); if (button.dataset.cmd) run(button); else if (button.dataset.action === "insert-checkbox") insertDescriptionCheckbox()
+        }
+    });
+    toolbar.addEventListener("click", event => {
+        const button = event.target.closest("button[data-cmd],button[data-action]"); if (button && event.detail === 0){
+            if (button.dataset.cmd) run(button); else if (button.dataset.action === "insert-checkbox") insertDescriptionCheckbox()
+        }
+    });
+    setupColorMenus();
+    setupDescriptionCheckboxes()
+}
+function normalizeDescriptionHtml(html){
+    const root = document.createElement("div");
+    root.innerHTML = html || "";
+    root.querySelectorAll("script,style,iframe,object,svg").forEach(node => node.remove());
+    const replaceTag =(node, tag) => {
+        const replacement = document.createElement(tag);
+        while (node.firstChild) replacement.appendChild(node.firstChild);
+        node.replaceWith(replacement);
+        return replacement
+    };
+    [...root.querySelectorAll("*")].reverse().forEach(original => {
+        if (!original.isConnected) return; let node = original, tag = node.tagName.toLowerCase(); if (tag === "b") node = replaceTag(node, "strong"); else if (tag === "i") node = replaceTag(node, "em"); else if (tag === "strike") node = replaceTag(node, "s"); else if (tag === "div") node = replaceTag(node, "p"); tag = node.tagName.toLowerCase(); if (tag === "span" &&([...node.classList].includes("rt-checkbox") ||[...node.classList].includes("rt-checkbox-checked"))){
+            const checked = node.classList.contains("rt-checkbox-checked"); node.className = checked ? "rt-checkbox-checked": "rt-checkbox"; node.textContent = checked ? "☑": "☐"; node.setAttribute("contenteditable", "false"); node.setAttribute("role", "checkbox"); node.setAttribute("aria-checked", String(checked));[...node.attributes].forEach(attr => {
+                if (!["class", "contenteditable", "role", "aria-checked"].includes(attr.name)) node.removeAttribute(attr.name)
+            })
+        } else if (tag === "span"){
+            const style = node.style, textDecoration = style.textDecorationLine || style.textDecoration || ""; if (style.fontWeight === "bold" || Number(style.fontWeight) >= 600){
+                const wrapper = document.createElement("strong"); while (node.firstChild) wrapper.appendChild(node.firstChild); node.appendChild(wrapper)
+            }
+            if (style.fontStyle === "italic"){
+                const wrapper = document.createElement("em"); while (node.firstChild) wrapper.appendChild(node.firstChild); node.appendChild(wrapper)
+            }
+            if (textDecoration.includes("underline")){
+                const wrapper = document.createElement("u"); while (node.firstChild) wrapper.appendChild(node.firstChild); node.appendChild(wrapper)
+            }
+            if (textDecoration.includes("line-through")){
+                const wrapper = document.createElement("s"); while (node.firstChild) wrapper.appendChild(node.firstChild); node.appendChild(wrapper)
+            }
+            const classes =[...node.classList].filter(value => /^rt-(fg|bg)-(red|yellow|green|blue|purple)$/.test(value)); node.removeAttribute("style"); node.removeAttribute("id");[...node.attributes].forEach(attr => {
+                if (attr.name !== "class") node.removeAttribute(attr.name)
+            });
+            node.className = classes.join(" "); if (!classes.length) unwrapSpan(node)
+        } else if (!["p", "br", "ul", "ol", "li", "strong", "em", "u", "s"].includes(tag)){
+            const parent = node.parentNode; while (node.firstChild) parent.insertBefore(node.firstChild, node); node.remove()
+        }
+    });
+    normalizeColorDom(root);
+    return root.innerHTML
+}
+async function showView(view, options = {}){
+    if (isCardDirty()){
+        const decision = await chooseAction({
+            title: "离开卡片编辑？", message: "当前卡片有尚未保存的修改。离开后这些修改将丢失。", primary: "放弃修改并离开", secondary: null, danger: true, focus: "cancel"
+        });
+        if (decision !== "primary") return false
+    }
+    for (const name of ["board", "today", "history", "settings"]) document.getElementById("view-" + name).hidden = name !== view;
+    document.querySelectorAll('.view-tabs [role="tab"]').forEach(button => {
+        const active = button.dataset.view === view; button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0: - 1
+    });
+    const settingsButton = document.getElementById("settings-button"), settingsActive = view === "settings";
+    settingsButton.classList.toggle("active", settingsActive);
+    settingsButton.setAttribute("aria-pressed", String(settingsActive));
+    if (view === "today") renderToday();
+    if (options.focusTab && view !== "settings") document.querySelector(`.view-tabs [data-view="${view}"]`)?.focus();
+    else if (view === "history") document.getElementById("search-q").focus();
+    else if (view === "settings") document.getElementById("view-settings").focus();
+    return true
+}
+function setupViewTabs(){
+    const tabs =[...document.querySelectorAll('.view-tabs [role="tab"]')];
+    document.querySelector(".view-tabs").addEventListener("keydown", event => {
+        const index = tabs.indexOf(event.target); if (index < 0) return; let next = index; if (event.key === "ArrowRight") next =(index + 1) % tabs.length; else if (event.key === "ArrowLeft") next =(index - 1 + tabs.length) % tabs.length; else if (event.key === "Home") next = 0; else if (event.key === "End") next = tabs.length - 1; else return; event.preventDefault(); void showView(tabs[next].dataset.view, {
+            focusTab: true
+        })
+    })
+}
+async function refresh(force = false){
+    if (!force && isCardDirty()){
+        const decision = await chooseAction({
+            title: "刷新看板？", message: "刷新将丢弃当前卡片尚未保存的修改。", primary: "放弃修改并刷新", secondary: null, danger: true, focus: "cancel"
+        });
+        if (decision !== "primary") return
+    }
+    const board = document.getElementById("board");
+    if (!state.columns.length){
+        board.innerHTML = '<div class="board-status" role="status">正在加载看板…</div>'
+    }
+    try {
+        const data = await api("GET", "/api/board");
+        state.columns = data.columns;
+        state.cards = data.cards;
+        state.revision = data.revision;
+        saveSortPreferences();
+        renderFilters();
+        renderBoard(true);
+        renderToday()
+    } catch (error){
+        if (state.columns.length){
+            const status = document.createElement("div");
+            status.className = "board-status board-error";
+            status.textContent = "刷新失败，当前显示的是上次加载内容。";
+            board.prepend(status)
+        } else {
+            board.innerHTML = '<div class="board-status board-error">看板加载失败。<button type="button" class="ghost board-retry">重新加载</button></div>';
+            board.querySelector(".board-retry").onclick =() => refresh(true)
+        }
+        toast("加载失败：" + error.message, true)
+    }
+}
+function parseLabels(value){
+    const result =[], seen = new Set(); (value || "").split(/[,，]/).map(v => v.trim()).filter(Boolean).forEach(label => {
+        const key = label.toLocaleLowerCase(); if (!seen.has(key)){
+            seen.add(key); result.push({
+                key, label
+            })
+        }
+    });
+    return result
+}
+function labelColor(label){
+    let hash = 0;
+    for (const char of label.toLocaleLowerCase()) hash =((hash << 5) - hash + char.charCodeAt(0)) | 0;
+    return "label-color-" + Math.abs(hash % 10)
+}
+function visibleCards(){
+    return state.cards.filter(card => {
+        if (state.filters.due === "today" &&!isToday(card)) return false; if (state.filters.due === "tomorrow" &&!isTomorrow(card)) return false; if (state.filters.due === "overdue" &&!isOverdue(card)) return false; if (state.filters.priority !== "all" && card.priority !== state.filters.priority) return false; if (state.filters.labels.length){
+            const keys = new Set(parseLabels(card.labels).map(item => item.key)); if (!state.filters.labels.some(label => keys.has(label))) return false
+        }
+        return true
+    })
+}
+function renderFilterSummary(){
+    const box = document.getElementById("filter-summary"), parts =[];
+    if (state.filters.due !== "all") parts.push(state.filters.due === "today" ? "今日截止": state.filters.due === "tomorrow" ? "明日截止": "已逾期");
+    if (state.filters.priority !== "all") parts.push(`${priorityLabel(state.filters.priority)}优先级`);
+    if (state.filters.labels.length) parts.push(`${state.filters.labels.length} 个标签`);
+    box.hidden =!parts.length;
+    box.textContent = parts.length ? `${parts.join(" · ")} · 显示 ${visibleCards().length}/${state.cards.length} 张卡片`: ""
+}
+function renderFilters(){
+    const dueBox = document.getElementById("due-filters");
+    clearChildren(dueBox);
+    [["today", "今日", state.cards.filter(isToday).length],["tomorrow", "明日", state.cards.filter(isTomorrow).length],["overdue", "逾期", state.cards.filter(isOverdue).length]].forEach(([key, label, count]) => {
+        const button = document.createElement("button"); button.type = "button"; const active = state.filters.due === key; button.className = "filter-chip" +(active ? " active": ""); button.setAttribute("aria-pressed", String(active)); button.textContent = `${label} ${count}`; button.onclick =() => {
+            state.filters.due = active ? "all": key; renderFilters(); renderBoard(); announce(`当前显示 ${visibleCards().length} 张卡片`)
+        };
+        dueBox.appendChild(button)
+    });
+    const priorityBox = document.getElementById("priority-filters");
+    clearChildren(priorityBox);
+    [["high", "高", "priority-high"],["medium", "中", "priority-medium"],["low", "低", "priority-low"]].forEach(([key, label, dotClass]) => {
+        const active = state.filters.priority === key, button = document.createElement("button"); button.type = "button"; button.className = "filter-chip priority-filter-chip" +(active ? " active": ""); button.setAttribute("aria-pressed", String(active)); const count = state.cards.filter(card => card.priority === key).length; const dot = document.createElement("span"); dot.className = "filter-priority-dot " + dotClass; dot.setAttribute("aria-hidden", "true"); button.appendChild(dot); button.append(document.createTextNode(`${label} ${count}`)); button.onclick =() => {
+            state.filters.priority = active ? "all": key; renderFilters(); renderBoard(); announce(`当前显示 ${visibleCards().length} 张卡片`)
+        };
+        priorityBox.appendChild(button)
+    });
+    const labels = new Map();
+    state.cards.forEach(card => parseLabels(card.labels).forEach(item => {
+        if (!labels.has(item.key)) labels.set(item.key, item.label)
+    })
+    );
+    const labelBox = document.getElementById("label-filters");
+    clearChildren(labelBox);
+    [...labels].sort((a, b) => a[1].localeCompare(b[1], "zh-CN")).forEach(([key, label]) => {
+        const active = state.filters.labels.includes(key), button = document.createElement("button"); button.type = "button"; button.className = `filter-chip card-label ${labelColor(label)}` +(active ? " active": ""); button.setAttribute("aria-pressed", String(active)); button.textContent = label; button.onclick =() => toggleLabelFilter(key); labelBox.appendChild(button)
+    });
+    renderFilterSummary();
+    document.getElementById("clear-filters").hidden =!hasActiveFilters()
+}
+function toggleLabelFilter(key){
+    state.filters.labels = state.filters.labels.includes(key) ? state.filters.labels.filter(value => value !== key):[...state.filters.labels, key];
+    renderFilters();
+    renderBoard();
+    announce(`当前显示 ${visibleCards().length} 张卡片`)
+}
+function clearBoardFilters(){
+    state.filters = {
+        due: "all", priority: "all", labels:[]
+    };
+    renderFilters();
+    renderBoard();
+    announce(`已清除筛选，显示 ${state.cards.length} 张卡片`)
+}
+function hideAutoArchiveTooltip(){
+    if (autoArchiveTooltipTimer !== null){
+        clearTimeout(autoArchiveTooltipTimer);
+        autoArchiveTooltipTimer = null
+    }
+    if (autoArchiveTooltip) autoArchiveTooltip.hidden = true;
+    autoArchiveTooltip = null
+}
+function setupAutoArchiveTooltip(header, tooltip){
+    const trigger = event => {
+        if (event.target.closest(".column-actions")) return;
+        hideAutoArchiveTooltip();
+        autoArchiveTooltip = tooltip;
+        autoArchiveTooltipTimer = setTimeout(() => {
+            autoArchiveTooltipTimer = null; if (header.isConnected && header.matches(":hover") &&!header.querySelector(".column-actions:hover")) tooltip.hidden = false
+        },
+        1000)
+    };
+    header.addEventListener("pointerover", event => {
+        if (event.target.closest(".column-actions")){
+            hideAutoArchiveTooltip(); return
+        }
+        if (event.relatedTarget && header.contains(event.relatedTarget) &&!event.relatedTarget.closest?.(".column-actions")) return; trigger(event)
+    });
+    header.addEventListener("pointerout", event => {
+        if (event.relatedTarget && header.contains(event.relatedTarget)){
+            if (event.relatedTarget.closest?.(".column-actions")) hideAutoArchiveTooltip(); return
+        }
+        hideAutoArchiveTooltip()
+    });
+    header.addEventListener("pointerdown", hideAutoArchiveTooltip);
+    header.querySelector(".column-actions").addEventListener("pointerenter", hideAutoArchiveTooltip)
+}
+function renderColumnSort(column, actions){
+    const sort = columnSort(column.id), button = document.createElement("button");
+    button.type = "button";
+    button.className = "column-sort-button" +(sort !== "position" ? " active": "");
+    button.setAttribute("aria-label", `排序列 ${column.name}，当前：${SORT_OPTIONS.get(sort)}`);
+    button.setAttribute("aria-haspopup", "menu");
+    button.setAttribute("aria-expanded", String(openSortColumnId === column.id));
+    button.title = sort === "position" ? "卡片排序：手动顺序": `卡片排序：${SORT_OPTIONS.get(sort)}。拖动位置将在切回手动顺序后显示。`;
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h9M8 18h6M4 5v14m0 0-2.5-2.5M4 19l2.5-2.5"/></svg>';
+    button.onclick = event => {
+        event.stopPropagation();
+        hideAutoArchiveTooltip();
+        openSortColumnId = openSortColumnId === column.id ? null : column.id;
+        renderBoard();
+        if (openSortColumnId === column.id) requestAnimationFrame(() => document.querySelector(`.column[data-col-id="${column.id}"] .column-sort-menu button[aria-checked="true"]`)?.focus())
+    };
+    actions.appendChild(button);
+    if (openSortColumnId !== column.id) return;
+    const menu = document.createElement("div");
+    menu.className = "column-sort-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", `排序列 ${column.name}`);
+    for (const [value, label] of SORT_OPTIONS){
+        const item = document.createElement("button"), active = value === sort;
+        item.type = "button";
+        item.setAttribute("role", "menuitemradio");
+        item.setAttribute("aria-checked", String(active));
+        item.dataset.sortValue = value;
+        item.innerHTML = `<span class="sort-menu-check" aria-hidden="true">${active?"✓":""}</span><span>${label}</span>`;
+        item.onclick = event => {
+            event.stopPropagation();
+            if (value === "position") delete state.sortByColumn[String(column.id)];
+            else state.sortByColumn[String(column.id)] = value;
+            saveSortPreferences();
+            openSortColumnId = null;
+            renderBoard();
+            announce(`列 ${column.name} 已按${label}排序`)
+        };
+        menu.appendChild(item)
+    }
+    menu.onkeydown = event => {
+        const items =[...menu.querySelectorAll("button")], index = items.indexOf(document.activeElement);
+        let next = index;
+        if (event.key === "ArrowDown") next =(index + 1) % items.length;
+        else if (event.key === "ArrowUp") next =(index - 1 + items.length) % items.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = items.length - 1;
+        else if (event.key === "Escape"){
+            event.preventDefault();
+            openSortColumnId = null;
+            renderBoard();
+            requestAnimationFrame(() => document.querySelector(`.column[data-col-id="${column.id}"] .column-sort-button`)?.focus());
+            return
+        } else
+        return;
+        event.preventDefault();
+        items[next].focus()
+    };
+    actions.appendChild(menu)
+}
+function renderBoard(keepScroll = false){
+    hideAutoArchiveTooltip();
+    const board = document.getElementById("board"), scrollLeft = keepScroll ? board.scrollLeft: 0, scrollTop = keepScroll ? board.scrollTop: 0;
+    clearChildren(board);
+    document.getElementById("filter-reorder-hint").hidden =!isManualReorderDisabled();
+    state.columns.slice().sort((a, b) => a.position - b.position).forEach(column => board.appendChild(renderColumn(column)));
+    const add = document.createElement("button");
+    add.className = "add-column-btn";
+    add.textContent = "+ 新增列";
+    add.onclick = addColumn;
+    board.appendChild(add);
+    if (keepScroll){
+        board.scrollLeft = scrollLeft;
+        board.scrollTop = scrollTop
+    }
+}
+function renderColumn(column){
+    const element = document.createElement("section");
+    element.className = "column";
+    element.dataset.colId = column.id;
+    const header = document.createElement("div");
+    header.className = "column-header";
+    header.draggable =!isManualReorderDisabled();
+    header.dataset.colId = column.id;
+    const allCards = state.cards.filter(card => card.column_id === column.id), cards = visibleCards().filter(card => card.column_id === column.id);
+    const title = document.createElement("h2");
+    title.className = "column-title";
+    title.id = `column-title-${column.id}`;
+    title.textContent = column.name;
+    element.setAttribute("aria-labelledby", title.id);
+    const count = document.createElement("span");
+    count.className = "column-count";
+    count.textContent = cards.length === allCards.length ? cards.length: `${cards.length}/${allCards.length}`;
+    const actions = document.createElement("div");
+    actions.className = "column-actions";
+    renderColumnSort(column, actions);
+    for (const [icon, label, handler] of [["<svg class=\"svg-icon column-action-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 20h4l11-11-4-4L4 16v4Zm9-13 4 4\"/></svg>", "重命名",() => renameColumn(column)],["<svg class=\"svg-icon column-action-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7\"/></svg>", "删除",() => deleteColumn(column)]]){
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "column-action-button " +(label === "删除" ? "column-delete-button": "column-edit-button");
+        button.innerHTML = icon;
+        button.setAttribute("aria-label", `${label}列 ${column.name}`);
+        button.onclick = event => {
+            event.stopPropagation();
+            hideAutoArchiveTooltip();
+            handler()
+        };
+        actions.appendChild(button)
+    }
+    header.append(title, count, actions);
+    if (column.name.trim() === "已完成"){
+        const tooltip = document.createElement("div");
+        tooltip.className = "auto-archive-tooltip";
+        tooltip.setAttribute("role", "tooltip");
+        tooltip.textContent = "自动归档：卡片进入“已完成”列满 30 天后，将移入历史归档。";
+        tooltip.hidden = true;
+        header.appendChild(tooltip);
+        setupAutoArchiveTooltip(header, tooltip)
+    }
+    element.appendChild(header);
+    const list = document.createElement("div");
+    list.className = "card-list";
+    list.dataset.colId = column.id;
+    sortCards(cards, column.id).forEach(card => list.appendChild(renderCard(card)));
+    if (!cards.length && allCards.length){
+        const empty = document.createElement("div");
+        empty.className = "filter-empty";
+        empty.textContent = "没有符合筛选的卡片";
+        list.appendChild(empty)
+    }
+    element.append(list, renderQuickCreate(column));
+    setupColumnDropZone(list);
+    header.addEventListener("dragstart", onColumnDragStart);
+    header.addEventListener("dragend", onColumnDragEnd);
+    return element
+}
+function renderQuickCreate(column){
+    if (state.quickCreate.columnId !== column.id){
+        const add = document.createElement("button");
+        add.className = "add-card-btn";
+        add.textContent = "+ 添加卡片";
+        add.onclick =() => {
+            state.quickCreate = {
+                columnId: column.id, title: "", submitting: false
+            };
+            renderBoard();
+            requestAnimationFrame(() => document.querySelector(".quick-card-input")?.focus())
+        };
+        return add
+    }
+    const form = document.createElement("div");
+    form.className = "quick-card-form";
+    const input = document.createElement("textarea");
+    input.className = "quick-card-input";
+    input.rows = 2;
+    input.placeholder = "输入卡片标题…";
+    input.value = state.quickCreate.title;
+    input.oninput =() => state.quickCreate.title = input.value;
+    input.onkeydown = event => {
+        if (event.key === "Enter" &&!event.shiftKey &&!event.isComposing){
+            event.preventDefault();
+            quickCreateCard(column.id)
+        }
+        if (event.key === "Escape"){
+            state.quickCreate = {
+                columnId: null, title: "", submitting: false
+            };
+            renderBoard()
+        }
+    };
+    const buttons = document.createElement("div");
+    buttons.className = "quick-card-actions";
+    const submit = document.createElement("button");
+    submit.className = "primary";
+    submit.textContent = state.quickCreate.submitting ? "添加中…": "添加";
+    submit.disabled = state.quickCreate.submitting;
+    submit.onclick =() => quickCreateCard(column.id);
+    const details = document.createElement("button");
+    details.className = "ghost";
+    details.textContent = "详细";
+    details.onclick = async () => {
+        const title = state.quickCreate.title;
+        state.quickCreate = {
+            columnId: null, title: "", submitting: false
+        };
+        renderBoard();
+        await openNewCard(column.id);
+        if (state.currentCardDraft) document.getElementById("card-title").value = title
+    };
+    const cancel = document.createElement("button");
+    cancel.className = "ghost";
+    cancel.textContent = "取消";
+    cancel.onclick =() => {
+        state.quickCreate = {
+            columnId: null, title: "", submitting: false
+        };
+        renderBoard()
+    };
+    buttons.append(submit, details, cancel);
+    form.append(input, buttons);
+    return form
+}
+async function quickCreateCard(columnId){
+    const title = state.quickCreate.title.trim();
+    if (state.quickCreate.submitting) return;
+    if (!title){
+        toast("标题不能为空", true);
+        document.querySelector(".quick-card-input")?.focus();
+        return
+    }
+    state.quickCreate.submitting = true;
+    renderBoard();
+    try {
+        await api("POST", "/api/cards", {
+            column_id: columnId, title, description: "", labels: "", due_date: "", priority: "medium", expected_board_revision: state.revision
+        });
+        state.quickCreate = {
+            columnId: null, title: "", submitting: false
+        };
+        await refresh(true);
+        toast(hasActiveFilters() ? "已创建；新卡片可能不符合当前筛选条件": "已创建")
+    } catch (error){
+        state.quickCreate.submitting = false;
+        toast("创建失败：" + error.message, true);
+        renderBoard()
+    }
+}
+function renderCard(card){
+    const element = document.createElement("article");
+    element.className = "card priority-" + card.priority;
+    element.dataset.cardId = card.id;
+    element.tabIndex = 0;
+    element.setAttribute("role", "button");
+    element.setAttribute("aria-label", `${card.title}，${priorityLabel(card.priority)}优先级${card.attachment_count?`，${card.attachment_count} 个附件`:""}，创建于 ${fullTimestamp(card.created_at)}`);
+    element.draggable =!isManualReorderDisabled() &&!state.batchMode;
+    if (state.batchMode){
+        const selectBox = document.createElement("input");
+        selectBox.type = "checkbox";
+        selectBox.className = "card-select-box";
+        selectBox.setAttribute("aria-label", `选择卡片“${card.title}”`);
+        selectBox.checked = state.batchSelected.has(card.id);
+        selectBox.onclick = event => event.stopPropagation();
+        selectBox.onchange =() => toggleBoardBatch(card);
+        element.classList.add("batch-mode");
+        element.classList.toggle("batch-selected", state.batchSelected.has(card.id));
+        element.appendChild(selectBox)
+    }
+    const title = document.createElement("div");
+    title.className = "card-title";
+    title.textContent = card.title;
+    element.appendChild(title);
+    if (card.description && state.cardDescriptionDisplay !== "none"){
+        const description = document.createElement("div");
+        description.className = "card-desc";
+        if (state.cardDescriptionDisplay !== "full") description.classList.add(state.cardDescriptionDisplay);
+        description.innerHTML = card.description;
+        element.appendChild(description)
+    }
+    const labels = parseLabels(card.labels);
+    if (labels.length){
+        const wrap = document.createElement("div");
+        wrap.className = "card-labels";
+        labels.forEach(item => {
+            const tag = document.createElement("button"); tag.type = "button"; tag.className = `card-label ${labelColor(item.label)}`; tag.textContent = item.label; tag.onclick = event => {
+                event.stopPropagation(); toggleLabelFilter(item.key)
+            };
+            wrap.appendChild(tag)
+        });
+        element.appendChild(wrap)
+    }
+    const footer = document.createElement("div");
+    footer.className = "card-footer";
+    const created = document.createElement("span");
+    created.className = "card-created-text";
+    created.textContent = `创建于 ${compactCreatedTime(card.created_at)}`;
+    created.title = `创建时间：${fullTimestamp(card.created_at)}`;
+    footer.appendChild(created);
+    if (card.attachment_count){
+        const attachment = document.createElement("span");
+        attachment.className = "card-attachment-count";
+        attachment.innerHTML = '<svg class="svg-icon card-meta-icon card-attachment-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 12.5 15 6a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7.1-7.1l8.2-8.2"/></svg><span></span>';
+        attachment.lastElementChild.textContent = String(card.attachment_count);
+        footer.appendChild(attachment)
+    }
+    if (card.due_date){
+        const due = document.createElement("span");
+        due.className = "card-due " + dueClass(card.due_date);
+        due.innerHTML = '<svg class="svg-icon card-meta-icon card-due-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg><span></span>';
+        due.lastElementChild.textContent = dueDisplay(card.due_date);
+        due.title = dueCountdown(card.due_date) || `截止 ${card.due_date}`;
+        footer.appendChild(due)
+    }
+    element.appendChild(footer);
+    element.onclick =() => state.batchMode ? toggleBoardBatch(card): openEditCard(card.id);
+    element.onkeydown = event => {
+        if ((event.key === "Enter" || event.key === " ") && event.target === element){
+            event.preventDefault();
+            state.batchMode ? toggleBoardBatch(card): openEditCard(card.id)
+        }
+    };
+    element.addEventListener("dragstart", onCardDragStart);
+    element.addEventListener("dragend", onCardDragEnd);
+    return element
+}
+function priorityLabel(value){
+    return value === "high" ? "高": value === "low" ? "低": "中"
+}
+function completedColumn(){
+    return state.columns.find(column => normalizedColumnName(column.name) === "已完成")
+}
+function incompleteColumn(){
+    return state.columns.find(column => normalizedColumnName(column.name) === "待办") || state.columns.find(column => normalizedColumnName(column.name) !== "已完成")
+}
+function cardColumnName(card){
+    return state.columns.find(column => column.id === card.column_id)?.name || "未知列"
+}
+function todayReasons(card){
+    const today = localDateKey(), todo = state.columns.find(column => normalizedColumnName(column.name) === "待办"), reasons =[];
+    if (card.column_id === todo?.id) reasons.push("待办任务");
+    if (dueDatePart(card.due_date) === today) reasons.push("今日截止");
+    return reasons
+}
+function todayGroups(){
+    const today = localDateKey(), tomorrow = addLocalDays(today, 1), completed = completedColumn(), todo = state.columns.find(column => normalizedColumnName(column.name) === "待办"), isCompleted = card => Boolean(card.completed_at) || card.column_id === completed?.id, isTodo = card => card.column_id === todo?.id, active = state.cards.filter(card =>!isCompleted(card));
+    const overdue = active.filter(card => dueDatePart(card.due_date) < today && Boolean(dueDatePart(card.due_date)));
+    const overdueIds = new Set(overdue.map(card => card.id));
+    const current = active.filter(card =>!overdueIds.has(card.id) &&(isTodo(card) || card.planned_date === today || dueDatePart(card.due_date) === today));
+    const currentIds = new Set(current.map(card => card.id));
+    const later = active.filter(card =>!currentIds.has(card.id) && dueDatePart(card.due_date) === tomorrow);
+    const done = state.cards.filter(card => timestampLocalDateKey(card.completed_at) === today).sort((a, b) => Number(b.planned_date === today) - Number(a.planned_date === today) ||(b.completed_at || "").localeCompare(a.completed_at || ""));
+    const plannedSort =(a, b) =>(a.planned_position ?? Number.MAX_SAFE_INTEGER) -(b.planned_position ?? Number.MAX_SAFE_INTEGER) ||(a.position ?? 0) -(b.position ?? 0);
+    return {
+        overdue: overdue.sort(plannedSort), today: current.sort(plannedSort), later: later.sort(plannedSort), done
+    }
+}
+function renderToday(){
+    const container = document.getElementById("today-sections");
+    if (!container) return;
+    closeTodayDueDialog(false);
+    const groups = todayGroups(), completed = completedColumn(), pendingCount =[...groups.overdue, ...groups.today].filter(card => card.column_id !== completed?.id).length, today = new Date(), tabCount = document.getElementById("today-tab-count");
+    document.getElementById("today-date").textContent = today.toLocaleDateString("zh-CN", {
+        year: "numeric", month: "long", day: "numeric", weekday: "long"
+    });
+    document.getElementById("today-pending-count").textContent = String(pendingCount);
+    document.getElementById("today-completed-count").textContent = String(groups.done.length);
+    document.getElementById("today-overdue-count").textContent = String(groups.overdue.length);
+    if (tabCount){
+        tabCount.hidden = pendingCount === 0;
+        tabCount.textContent = pendingCount ? String(pendingCount): "";
+        tabCount.setAttribute("aria-label", `${pendingCount} 件待完成`)
+    }
+    clearChildren(container);
+    container.append(renderTodaySection("逾期", groups.overdue, "overdue"), renderTodaySection("今日", groups.today, "today"), renderTodaySection("稍后", groups.later, "later"), renderTodaySection("今日已完成", groups.done, "done"))
+}
+function renderTodaySection(title, cards, key){
+    const section = document.createElement("section");
+    section.className = `today-section today-section-${key}`;
+    const heading = document.createElement("div");
+    heading.className = "today-section-heading";
+    const label = document.createElement("h3");
+    label.textContent = `${title} ${cards.length}`;
+    heading.appendChild(label);
+    section.appendChild(heading);
+    const list = document.createElement("div");
+    list.className = "today-list";
+    list.dataset.todayGroup = key;
+    if (!cards.length){
+        const empty = document.createElement("p");
+        empty.className = "today-empty";
+        empty.textContent = key === "done" ? "今日还没有完成任务": "暂无任务";
+        list.appendChild(empty)
+    } else
+    cards.forEach(card => list.appendChild(renderTodayCard(card, key)));
+    if (key === "today") setupTodayPlanDrop(list);
+    section.appendChild(list);
+    return section
+}
+function renderTodayCard(card, group){
+    const row = document.createElement("article"), today = localDateKey();
+    row.className = `today-card priority-${card.priority}`;
+    row.dataset.cardId = card.id;
+    if (group === "today" && card.planned_date === today){
+        row.draggable = true;
+        row.classList.add("today-planned-card");
+        row.addEventListener("dragstart", event => {
+            event.dataTransfer.effectAllowed = "move"; row.classList.add("dragging"); void row.offsetWidth; setCardDragImage(event); event.dataTransfer.setData("text/plain", String(card.id))
+        });
+        row.addEventListener("dragend",() => {
+            row.classList.remove("dragging"); clearCardDragPreview()
+        })
+    }
+    const complete = document.createElement("button");
+    complete.type = "button";
+    complete.className = "today-complete-button";
+    complete.title = group === "done" ? "标记为未完成": "标记完成";
+    complete.setAttribute("aria-label", `${group==="done"?"标记为未完成":"完成"} ${card.title}`);
+    complete.onclick =() => group === "done" ? reopenTodayCard(card): completeTodayCard(card);
+    const content = document.createElement("button");
+    content.type = "button";
+    content.className = "today-card-content";
+    content.onclick =() => openEditCard(card.id);
+    const title = document.createElement("strong");
+    title.textContent = card.title;
+    const reasons = todayReasons(card), reasonWrap = document.createElement("span");
+    reasonWrap.className = "today-card-reasons";
+    reasons.forEach(reason => {
+        const badge = document.createElement("span"); badge.className = "today-reason-badge"; badge.textContent = reason; reasonWrap.appendChild(badge)
+    });
+    const meta = document.createElement("span");
+    meta.className = "today-card-meta";
+    const labels = parseLabels(card.labels).map(item => item.label).join("、");
+    meta.textContent =[card.due_date && `截止 ${dueDisplay(card.due_date)}`, `${priorityLabel(card.priority)}优先级`, labels && `标签 ${labels}`, `所属列 ${cardColumnName(card)}`].filter(Boolean).join(" · ");
+    content.append(title);
+    if (reasons.length) content.appendChild(reasonWrap);
+    content.appendChild(meta);
+    const actions = document.createElement("div");
+    actions.className = "today-card-actions";
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "ghost";
+    openButton.textContent = "打开";
+    openButton.onclick =() => openEditCard(card.id);
+    actions.appendChild(openButton);
+    if (group !== "done") actions.appendChild(renderTodayDueControl(card));
+    row.append(complete, content, actions);
+    return row
+}
+async function completeTodayCard(card){
+    const column = completedColumn();
+    if (!column){
+        toast("没有名为“已完成”的列，无法完成任务", true);
+        return
+    }
+    try {
+        await api("PUT", `/api/cards/${card.id}/move`, {
+            column_id: column.id, position: state.cards.filter(item => item.column_id === column.id).length, ...versionPayload(card)
+        });
+        await refresh(true);
+        toast(`已完成“${card.title}”`)
+    } catch (error){
+        toast("完成失败：" + error.message, true)
+    }
+}
+async function reopenTodayCard(card){
+    const column = incompleteColumn();
+    if (!column){
+        toast("没有可用的未完成列，请先创建或重命名一个列", true);
+        return
+    }
+    try {
+        await api("PUT", `/api/cards/${card.id}/move`, {
+            column_id: column.id, position: state.cards.filter(item => item.column_id === column.id &&!item.archived).length, ...versionPayload(card)
+        });
+        await refresh(true);
+        toast(`已将“${card.title}”标记为未完成`)
+    } catch (error){
+        toast("恢复未完成失败：" + error.message, true)
+    }
+}
+async function planTodayCard(card, plannedDate, position){
+    const payload = {
+        planned_date: plannedDate, ...versionPayload(card)
+    };
+    if (position != null) payload.position = position;
+    try {
+        const result = await api("PUT", `/api/cards/${card.id}/plan`, payload);
+        state.revision = result.revision;
+        await refresh(true);
+        return true
+    } catch (error){
+        toast("更新今日计划失败：" + error.message, true);
+        await refresh(true);
+        return false
+    }
+}
+function shiftedDue(value){
+    const parts = splitDue(value), date = addLocalDays(parts.date, 1);
+    return date ? joinDue(date, parts.time): value
+}
+function closeTodayDueDialog(restoreFocus = true){
+    if (!openTodayDueDialog) return;
+    const {
+        overlay, opener
+    } =
+    openTodayDueDialog;
+    openTodayDueDialog = null;
+    overlay.remove();
+    if (restoreFocus && opener?.isConnected) opener.focus()
+}
+async function updateTodayCardDue(card, dueDate, message){
+    const payload = {
+        column_id: card.column_id, title: card.title, description: card.description || "", labels: card.labels || "", due_date: dueDate, planned_date: card.planned_date || "", priority: card.priority, ...versionPayload(card)
+    };
+    try {
+        await api("PUT", `/api/cards/${card.id}`, payload);
+        await refresh(true);
+        toast(message)
+    } catch (error){
+        toast("更新截止日期失败：" + error.message, true);
+        await refresh(true)
+    }
+}
+async function postponeTodayCard(card){
+    const due = dueDatePart(card.due_date);
+    if (!due){
+        toast("当前没有截止日期，无法延期", true);
+        return
+    }
+    await updateTodayCardDue(card, shiftedDue(card.due_date), "截止日期已延期一天")
+}
+function openTodayDueDialogFor(card, opener){
+    closeTodayDueDialog(false);
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay today-due-dialog-overlay";
+    const dialog = document.createElement("div");
+    dialog.className = "modal small today-due-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const title = document.createElement("h2");
+    title.id = `today-due-dialog-title-${card.id}`;
+    title.textContent = "修改截止日期和时间";
+    dialog.setAttribute("aria-labelledby", title.id);
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    header.appendChild(title);
+    const body = document.createElement("div");
+    body.className = "modal-body today-due-dialog-body";
+    const fields = document.createElement("div");
+    fields.className = "due-inputs today-due-fields";
+    const due = splitDue(card.due_date), dateId = `today-due-date-${card.id}`, timeId = `today-due-time-${card.id}`;
+    const buildField =(type, id, label, value) => {
+        const shell = document.createElement("span");
+        shell.className = `date-input-shell ${type==="date"?"date-shell-calendar":"date-shell-time"}`;
+        const trigger = document.createElement("button");
+        trigger.type = "button";
+        trigger.className = "date-picker-trigger";
+        trigger.title = `选择${label}`;
+        trigger.setAttribute("aria-label", `打开${label}选择器`);
+        trigger.innerHTML = type === "date" ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v6m8-6v6M4 10h16"/></svg>': '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>';
+        const input = document.createElement("input");
+        input.className = "native-date-control";
+        input.type = type;
+        input.id = id;
+        input.value = value;
+        input.setAttribute("aria-label", label);
+        if (type === "time") input.step = "60";
+        const clear = document.createElement("button");
+        clear.type = "button";
+        clear.className = type === "date" ? "date-clear-btn": "time-clear-btn";
+        clear.title = `清除${label}`;
+        clear.setAttribute("aria-label", `清除${label}`);
+        clear.textContent = "×";
+        const sync =() => {
+            clear.hidden =!input.value
+        };
+        input.addEventListener("input", sync);
+        clear.onclick =() => {
+            input.value = "";
+            input.dispatchEvent(new Event("input", {
+                bubbles: true
+            })
+            );
+            input.dispatchEvent(new Event("change", {
+                bubbles: true
+            })
+            )
+        };
+        trigger.onclick =() => openDateTimePicker(id, trigger);
+        sync();
+        shell.append(trigger, input, clear);
+        return {
+            shell, input, trigger
+        }
+    };
+    const dateField = buildField("date", dateId, "截止日期", due.date), timeField = buildField("time", timeId, "截止时间", due.time);
+    fields.append(dateField.shell, timeField.shell);
+    const quick = document.createElement("div");
+    quick.className = "today-due-dialog-quick";
+    const today = localDateKey(), tomorrow = addLocalDays(today, 1), dayAfterTomorrow = addLocalDays(today, 2), now = new Date(), weekday = now.getDay(), thisFriday = addLocalDays(today,(5 - weekday + 7) % 7), nextFriday = addLocalDays(thisFriday, 7), monthEndDate = new Date(now.getFullYear(), now.getMonth() + 1, 0), monthEndDay = monthEndDate.getDay(), lastWorkday = localDateKey(new Date(monthEndDate.getFullYear(), monthEndDate.getMonth(), monthEndDate.getDate() -(monthEndDay === 6 ? 1: monthEndDay === 0 ? 2: 0)));
+    [["今天", today],["明天", tomorrow],["后天", dayAfterTomorrow],["本周五", thisFriday],["下周五", nextFriday],["月底", lastWorkday]].forEach(([label, value]) => {
+        const button = document.createElement("button"); button.type = "button"; button.className = "ghost"; button.textContent = label; button.disabled =!value; button.onclick =() => {
+            dateField.input.value = value; dateField.input.dispatchEvent(new Event("input", {
+                bubbles: true
+            })
+            )
+        };
+        quick.appendChild(button)
+    });
+    body.append(fields, quick);
+    const footer = document.createElement("div");
+    footer.className = "modal-footer";
+    const clearAll = document.createElement("button");
+    clearAll.type = "button";
+    clearAll.className = "ghost";
+    clearAll.textContent = "清除";
+    clearAll.disabled =!due.date;
+    clearAll.onclick =() => {
+        dateField.input.value = "";
+        timeField.input.value = "";
+        dateField.input.dispatchEvent(new Event("input", {
+            bubbles: true
+        })
+        );
+        timeField.input.dispatchEvent(new Event("input", {
+            bubbles: true
+        })
+        )
+    };
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "ghost";
+    cancel.textContent = "取消";
+    cancel.onclick =() => closeTodayDueDialog();
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "primary";
+    save.textContent = "保存";
+    save.onclick = async () => {
+        const value = joinDue(dateField.input.value, timeField.input.value);
+        closeTodayDueDialog(false);
+        await updateTodayCardDue(card, value, value ? "截止日期和时间已更新": "已清除截止日期")
+    };
+    footer.append(clearAll, cancel, save);
+    dialog.append(header, body, footer);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    openTodayDueDialog = {
+        overlay, opener
+    };
+    overlay.addEventListener("mousedown", event => {
+        if (event.target === overlay) event.preventDefault()
+    });
+    overlay.addEventListener("click", event => {
+        if (event.target === overlay) closeTodayDueDialog()
+    });
+    dialog.addEventListener("keydown", event => {
+        if (event.key === "Escape"){
+            event.preventDefault(); closeTodayDueDialog(); return
+        }
+        if (event.key !== "Tab") return; const items =[...dialog.querySelectorAll("button:not(:disabled),input:not(:disabled)")], first = items[0], last = items.at(- 1); if (event.shiftKey && document.activeElement === first){
+            event.preventDefault(); last.focus()
+        } else if (!event.shiftKey && document.activeElement === last){
+            event.preventDefault(); first.focus()
+        }
+    });
+    requestAnimationFrame(() => dateField.trigger.focus())
+}
+function renderTodayDueControl(card){
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost today-due-button";
+    button.textContent = "修改截止日期";
+    button.onclick = event => openTodayDueDialogFor(card, event.currentTarget);
+    return button
+}
+function setupTodayPlanDrop(list){
+    list.addEventListener("dragover", event => {
+        if (!event.dataTransfer.types.includes("text/plain")) return; event.preventDefault(); const after = getDragAfterElement(list, event.clientY), dragging = list.querySelector(".today-card.dragging"); if (dragging) after ? list.insertBefore(dragging, after): list.appendChild(dragging)
+    });
+    list.addEventListener("drop", async event => {
+        event.preventDefault(); const id = Number(event.dataTransfer.getData("text/plain")), card = state.cards.find(item => item.id === id); if (!card || card.planned_date !== localDateKey()) return; const ids =[...list.querySelectorAll(".today-planned-card")].map(node => Number(node.dataset.cardId)), position = Math.max(0, ids.indexOf(id)); await planTodayCard(card, localDateKey(), position)
+    })
+}
+async function quickAddToday(event){
+    event.preventDefault();
+    const input = document.getElementById("today-quick-title"), button = document.getElementById("today-quick-submit"), title = input.value.trim();
+    if (!title){
+        toast("标题不能为空", true);
+        input.focus();
+        return
+    }
+    const column = state.columns.find(item => normalizedColumnName(item.name) === "待办") || state.columns.slice().sort((a, b) => a.position - b.position)[0];
+    if (!column){
+        toast("请先创建一个看板列", true);
+        return
+    }
+    if (state.todayQuickCreate.submitting) return;
+    state.todayQuickCreate.submitting = true;
+    setBusy(button, true, "添加中…");
+    try {
+        await api("POST", "/api/cards", {
+            column_id: column.id, title, description: "", labels: "", due_date: localDateKey(), priority: "medium", planned_date: localDateKey(), expected_board_revision: state.revision
+        });
+        input.value = "";
+        await refresh(true);
+        toast(`已添加到“${column.name}”列并加入今日`)
+    } catch (error){
+        toast("创建失败：" + error.message, true)
+    } finally {
+        state.todayQuickCreate.submitting = false;
+        setBusy(button, false)
+    }
+}
+function clearCardDragPreview(){
+    cardDragPreview?.remove();
+    cardDragPreview = null
+}
+function setCardDragImage(event){
+    clearCardDragPreview();
+    const source = event.currentTarget, preview = source.cloneNode(true), box = source.getBoundingClientRect();
+    preview.classList.remove("dragging");
+    preview.classList.add("card-drag-preview");
+    preview.removeAttribute("id");
+    preview.removeAttribute("role");
+    preview.removeAttribute("tabindex");
+    preview.draggable = false;
+    preview.style.width = box.width + "px";
+    document.body.appendChild(preview);
+    cardDragPreview = preview;
+    event.dataTransfer.setDragImage(preview, Math.min(Math.max(event.clientX - box.left, 0), box.width), Math.min(Math.max(event.clientY - box.top, 0), box.height))
+}
+function onCardDragStart(event){
+    if (isManualReorderDisabled() || state.batchMode || event.target.closest("button")){
+        event.preventDefault();
+        return
+    }
+    drag.cardId = Number(event.currentTarget.dataset.cardId);
+    drag.sourceColId = Number(event.currentTarget.closest(".card-list").dataset.colId);
+    event.dataTransfer.effectAllowed = "move";
+    event.currentTarget.classList.add("dragging");
+    void event.currentTarget.offsetWidth;
+    setCardDragImage(event);
+    event.dataTransfer.setData("text/plain", String(drag.cardId))
+}
+function onCardDragEnd(event){
+    event.currentTarget.classList.remove("dragging");
+    clearCardDragPreview();
+    document.querySelectorAll(".drop-placeholder").forEach(node => node.remove());
+    drag = {
+        cardId: null, sourceColId: null
+    }
+}
+function onColumnDragStart(event){
+    hideAutoArchiveTooltip();
+    if (isManualReorderDisabled() || event.target.closest(".column-actions") ||!event.currentTarget.draggable){
+        event.preventDefault();
+        return
+    }
+    colDrag.colId = Number(event.currentTarget.dataset.colId);
+    colDrag.colEl = event.currentTarget.closest(".column");
+    colDrag.colEl.classList.add("dragging");
+    event.dataTransfer.setData("text/plain", "col:" + colDrag.colId)
+}
+function onColumnDragEnd(){
+    colDrag.colEl?.classList.remove("dragging");
+    colDrag = {
+        colId: null, colEl: null
+    }
+}
+function setupBoardColumnDrop(){
+    const board = document.getElementById("board");
+    board.addEventListener("dragover", event => {
+        if (isManualReorderDisabled() || colDrag.colId == null) return; event.preventDefault(); const after = getColumnDragAfter(board, event.clientX); after ? board.insertBefore(colDrag.colEl, after): board.appendChild(colDrag.colEl)
+    });
+    board.addEventListener("drop", async event => {
+        if (isManualReorderDisabled() || colDrag.colId == null) return; event.preventDefault(); const ids =[...board.querySelectorAll(".column")].map(node => Number(node.dataset.colId)); try {
+            await api("POST", "/api/columns/reorder", {
+                ids, expected_board_revision: state.revision
+            });
+            await refresh(true)
+        } catch (error){
+            toast("列排序失败：" + error.message, true); await refresh(true)
+        }
+    })
+}
+function getColumnDragAfter(board, x){
+    return [...board.querySelectorAll(".column:not(.dragging)")].reduce((best, child) => {
+        const box = child.getBoundingClientRect(), offset = x - box.left - box.width / 2; return offset < 0 && offset > best.offset ? {
+            offset, element: child
+        }
+        : best
+    }, {
+        offset: - Infinity
+    })
+    .element
+}
+function setupColumnDropZone(list){
+    list.addEventListener("dragover", event => {
+        if (isManualReorderDisabled() || drag.cardId == null) return; event.preventDefault(); const after = getDragAfterElement(list, event.clientY); let placeholder = list.querySelector(".drop-placeholder"); if (!placeholder){
+            placeholder = document.createElement("div"); placeholder.className = "drop-placeholder"
+        }
+        after ? list.insertBefore(placeholder, after): list.appendChild(placeholder)
+    });
+    list.addEventListener("drop", async event => {
+        if (isManualReorderDisabled() || drag.cardId == null) return; event.preventDefault(); const card = state.cards.find(item => item.id === drag.cardId), target = Number(list.dataset.colId), placeholder = list.querySelector(".drop-placeholder"); let position = 0, node = placeholder?.previousElementSibling; while (node){
+            if (node.classList.contains("card") &&!node.classList.contains("dragging")) position++; node = node.previousElementSibling
+        }
+        placeholder?.remove(); clearCardDragPreview(); try {
+            await api("PUT", `/api/cards/${card.id}/move`, {
+                column_id: target, position, ...versionPayload(card)
+            });
+            await refresh(true)
+        } catch (error){
+            toast("移动失败：" + error.message, true); await refresh(true)
+        }
+    })
+}
+function getDragAfterElement(container, y){
+    return [...container.querySelectorAll(".card:not(.dragging)")].reduce((best, child) => {
+        const box = child.getBoundingClientRect(), offset = y - box.top - box.height / 2; return offset < 0 && offset > best.offset ? {
+            offset, element: child
+        }
+        : best
+    }, {
+        offset: - Infinity
+    })
+    .element
+}
+function populateCardColumns(selected, extra){
+    const select = document.getElementById("card-column");
+    clearChildren(select);
+    state.columns.forEach(column => {
+        const option = document.createElement("option"); option.value = column.id; option.textContent = column.name; option.selected = column.id === selected; select.appendChild(option)
+    });
+    if (extra && !state.columns.some(column => column.id === extra.value)){
+        const option = document.createElement("option"); option.value = extra.value; option.textContent = extra.label; option.selected = true; select.appendChild(option)
+    }
+    syncThemedSelect(select)
+}
+function cardSnapshot(){
+    return {
+        title: document.getElementById("card-title").value, description: normalizeDescriptionHtml(document.getElementById("card-description").innerHTML), labels: document.getElementById("card-labels").value, due: document.getElementById("card-due").value, time: document.getElementById("card-due-time").value, priority: document.getElementById("card-priority").value, column: document.getElementById("card-column").value
+    }
+}
+function isCardDirty(){
+    return!document.getElementById("card-modal").hidden && state.initialCardSnapshot && JSON.stringify(cardSnapshot()) !== JSON.stringify(state.initialCardSnapshot)
+}
+function openModal(id, opener, focusId){
+    showModal(id, state, opener, focusId)
+}
+function hideModal(id){
+    dismissModal(id, state)
+}
+async function openNewCard(columnId){
+    state.currentCardId = null;
+    state.currentCardCol = columnId;
+    state.currentCardDraft = false;
+    resetAttachmentState();
+    try {
+        const result = await api("POST", "/api/cards/drafts", {
+            column_id: columnId, expected_board_revision: state.revision
+        });
+        state.currentCardId = result.card.id;
+        state.currentCardVersion = result.card.version;
+        state.currentCardDraft = true
+    } catch (error){
+        toast("无法创建卡片草稿：" + error.message, true);
+        return
+    }
+    document.querySelector(".card-archive-btn").hidden = true;
+    document.querySelector(".card-permanent-delete-btn").hidden = true;
+    document.getElementById("modal-title-text").textContent = "新建卡片";
+    for (const id of ["card-title", "card-labels", "card-due", "card-due-time"]) document.getElementById(id).value = "";
+    document.getElementById("card-description").innerHTML = "";
+    document.getElementById("card-priority").value = "medium";
+    syncCardDateControl();
+    syncCardTimeControl();
+    document.getElementById("card-meta").textContent = "草稿已创建，可立即添加附件";
+    populateCardColumns(columnId);
+    document.getElementById("card-column-field").hidden = false;
+    document.getElementById("card-move-controls").hidden = true;
+    openModal("card-modal", document.activeElement, "card-title");
+    state.initialCardSnapshot = cardSnapshot();
+    renderAttachments()
+}
+async function openEditCard(cardId){
+    let card = state.cards.find(item => item.id === cardId) || state.searchResults.get(cardId);
+    if (!card){
+        try {
+            card = await api("GET", `/api/cards/${cardId}`)
+        } catch (error){
+            toast("卡片加载失败：" + error.message, true);
+            return
+        }
+    }
+    const archived = Boolean(card.archived);
+    state.currentCardId = cardId;
+    state.currentCardVersion = card.version;
+    state.currentCardDraft = false;
+    state.currentCardCol = card.column_id;
+    resetAttachmentState();
+    document.querySelector(".card-archive-btn").hidden = archived;
+    document.querySelector(".card-permanent-delete-btn").hidden = false;
+    document.getElementById("modal-title-text").textContent = "编辑卡片";
+    document.getElementById("card-title").value = card.title;
+    document.getElementById("card-description").innerHTML = hydrateDescriptionHtml(card.description);
+    document.getElementById("card-labels").value = card.labels || "";
+    const due = splitDue(card.due_date);
+    document.getElementById("card-due").value = due.date;
+    syncCardDateControl();
+    document.getElementById("card-due-time").value = due.time;
+    syncCardTimeControl();
+    document.getElementById("card-priority").value = card.priority;
+    document.getElementById("card-meta").textContent = `创建于 ${card.created_at}　更新于 ${card.updated_at}${archived ? "　（已归档，保存后保持归档状态）": ""}`;
+    populateCardColumns(card.column_id, archived ? {
+        value: card.column_id, label: card.column_name || "原列"
+    } : null);
+    document.getElementById("card-column-field").hidden = archived;
+    document.getElementById("card-move-controls").hidden = isManualReorderDisabled() || archived;
+    openModal("card-modal", document.querySelector(`.card[data-card-id="${cardId}"]`) || document.querySelector(`.result-item[data-card-id="${cardId}"]`), "card-title");
+    state.initialCardSnapshot = cardSnapshot();
+    loadAttachments(cardId)
+}
+async function closeCardModal(force = false){
+    const pending = attachmentWorkPending(), draftHasWork = state.currentCardDraft &&(isCardDirty() || state.attachments.length || state.attachmentQueue.length), editedHasWork =!state.currentCardDraft &&(isCardDirty() || pending);
+    if (!force && draftHasWork){
+        const uploaded = state.attachments.length, queued = state.attachmentQueue.filter(item =>["waiting", "uploading", "processing"].includes(item.status)).length, decision = await chooseAction({
+            title: "取消新建卡片？", message: `草稿、已上传附件以及等待中或正在上传的附件都将被永久删除。此操作无法撤销。\n\n已上传附件：${uploaded} 个\n等待中或正在上传：${queued} 个`, primary: "删除草稿", secondary: null, danger: true, focus: "cancel"
+        });
+        if (decision !== "primary") return false
+    } else if (!force && editedHasWork){
+        const message = `卡片内容的未保存修改将丢失。已完成的附件上传、覆盖或删除会保留。${pending?"\n等待中或正在上传的附件将被取消。":""}`, decision = await chooseAction({
+            title: "放弃未保存的修改？", message, primary: "放弃修改并关闭", secondary: null, danger: true, focus: "cancel"
+        });
+        if (decision !== "primary") return false
+    }
+    state.attachmentQueue.forEach(item => {
+        if (["waiting", "uploading", "processing"].includes(item.status)){
+            item.status = "cancelled"; item.xhr?.abort()
+        }
+    });
+    if (state.currentCardDraft && state.currentCardId){
+        try {
+            const response = await fetch(`/api/cards/${state.currentCardId}/draft`, {
+                method: "DELETE", headers: {
+                    "X-Card-Version": String(state.currentCardVersion)
+                }
+            });
+            if (!response.ok &&!force){
+                const data = await response.json();
+                throw new Error(data.error?.message || "草稿清理失败")
+            }
+        } catch (error){
+            if (!force){
+                toast("草稿清理失败：" + error.message, true);
+                return false
+            }
+        }
+    }
+    state.initialCardSnapshot = null;
+    state.currentCardId = null;
+    state.currentCardDraft = false;
+    resetAttachmentState();
+    hideModal("card-modal");
+    return true
+}
+async function saveCard(){
+    if (state.saving) return false;
+    const snapshot = cardSnapshot(), title = snapshot.title.trim(), button = document.querySelector(".card-save-btn");
+    if (!title){
+        toast("标题不能为空", true);
+        document.getElementById("card-title").focus();
+        return false
+    }
+    if (snapshot.time &&!snapshot.due){
+        toast("请先选择截止日期", true);
+        document.getElementById("card-due").focus();
+        return false
+    }
+    state.saving = true;
+    setBusy(button, true, "保存中…");
+    const selectedColumn = Number(snapshot.column), currentCard = state.cards.find(item => item.id === state.currentCardId) || state.searchResults.get(state.currentCardId), payload = {
+        column_id: selectedColumn, title, description: snapshot.description.trim(), labels: snapshot.labels.trim(), due_date: joinDue(snapshot.due, snapshot.time), priority: snapshot.priority, planned_date: currentCard?.planned_date || "", expected_board_revision: state.revision
+    };
+    try {
+        let saved;
+        if (state.currentCardDraft){
+            saved = await api("PUT", `/api/cards/${state.currentCardId}/finalize`, {
+                ...payload, expected_version: state.currentCardVersion
+            });
+            state.currentCardDraft = false
+        } else {
+            const card = state.cards.find(item => item.id === state.currentCardId) || state.searchResults.get(state.currentCardId);
+            if (!card){
+                toast("卡片数据已失效，请刷新后重试", true);
+                return false
+            }
+            saved = await api("PUT", `/api/cards/${card.id}`, {
+                ...payload, expected_version: card.version
+            })
+        }
+        state.currentCardVersion = saved.card.version;
+        state.revision = saved.revision;
+        state.initialCardSnapshot = cardSnapshot();
+        await refresh(true);
+        if (currentCard?.archived && !document.getElementById("view-history").hidden){
+            await doSearch()
+        }
+        if (attachmentWorkPending()){
+            document.getElementById("card-meta").textContent = "卡片已保存，附件继续上传中";
+            toast("卡片已保存，附件继续上传中")
+        } else {
+            await closeCardModal(true);
+            toast("已保存")
+        }
+        return true
+    } catch (error){
+        toast((error.code?.includes("CONFLICT") ? "保存冲突：": "保存失败：") + error.message, true);
+        return false
+    } finally {
+        state.saving = false;
+        setBusy(button, false)
+    }
+}
+async function confirmDirtyAction(actionLabel){
+    if (!isCardDirty()) return "secondary";
+    return chooseAction({
+        title: `${actionLabel}卡片`, message: "当前卡片内容尚未保存，请选择处理方式。", primary: `保存并${actionLabel}`, secondary: `放弃修改并${actionLabel}`
+    })
+}
+async function archiveCard(card){
+    const decision = await confirmDirtyAction("归档");
+    if (decision === "cancel") return;
+    if (decision === "primary" &&!await saveCard()) return;
+    const current = state.cards.find(item => item.id === card.id) || card, confirmation = await chooseAction({
+        title: "归档卡片？", message: `“${current.title}”将移入历史归档，之后可以恢复。`, primary: "归档卡片", secondary: null, primaryClass: "ghost", focus: "cancel"
+    });
+    if (confirmation !== "primary") return;
+    try {
+        const result = await api("DELETE", `/api/cards/${current.id}`, versionPayload(current));
+        closeCardModal(true);
+        await refresh(true);
+        toast(`已归档“${current.title}”`, {
+            duration: 6000, actionText: "撤销", onAction: async () => {
+                await api("POST", `/api/cards/${current.id}/restore`, {
+                    target_column_id: result.column_id, position: result.position, expected_version: result.version, expected_board_revision: state.revision
+                });
+                await refresh(true); toast("已恢复")
+            }
+        })
+    } catch (error){
+        toast("归档失败：" + error.message, true)
+    }
+}
+function currentCardForAction(){
+    return state.cards.find(item => item.id === state.currentCardId) || state.searchResults.get(state.currentCardId)
+}
+async function archiveCurrentCard(){
+    if (state.currentCardDraft) return closeCardModal();
+    const card = currentCardForAction();
+    if (card) await archiveCard(card)
+}
+function permanentDeleteMessage(card, unsaved){
+    const count = Number(card.attachment_count) || state.attachments.length || 0;
+    return `你将永久删除卡片“${card.title}”。\n\n附件：${count} 个（将一并永久删除）\n${unsaved?"未保存修改：有（将永久丢失）":"未保存修改：无"}\n\n此操作不可撤销、不能从历史恢复，也没有撤销入口。`
+}
+async function confirmPermanentDelete(card, unsaved){
+    const opener = document.activeElement, first = await chooseAction({
+        title: "永久删除卡片？", message: permanentDeleteMessage(card, unsaved), primary: "继续永久删除", secondary: null, primaryClass: "ghost", focus: "cancel", opener, restoreFocus: false
+    });
+    if (first !== "primary"){
+        if (opener?.isConnected) opener.focus();
+        return false
+    }
+    const second = await chooseAction({
+        title: "最后确认：无法恢复", message: `确认永久删除“${card.title}”及其 ${Number(card.attachment_count)||state.attachments.length||0} 个附件？此操作立即生效且无撤销。`, primary: "永久删除", secondary: null, primaryClass: "ghost", focus: "cancel", opener
+    });
+    return second === "primary"
+}
+async function permanentlyDeleteCard(card, options = {}){
+    const unsaved = Boolean(options.unsaved);
+    if (!await confirmPermanentDelete(card, unsaved)) return;
+    try {
+        await api("DELETE", `/api/cards/${card.id}/permanent`, versionPayload(card));
+        if (options.fromEditor) await closeCardModal(true);
+        await refresh(true);
+        if (options.fromHistory) await doSearch();
+        toast(`已永久删除“${card.title}”`)
+    } catch (error){
+        toast("永久删除失败：" + error.message, true)
+    }
+}
+async function permanentlyDeleteCurrentCard(){
+    if (state.currentCardDraft) return closeCardModal();
+    const card = currentCardForAction();
+    if (card) await permanentlyDeleteCard(card, {
+        fromEditor: true, fromHistory:!document.getElementById("view-history").hidden, unsaved: Boolean(isCardDirty())
+    })
+}
+async function moveCurrentCard(direction){
+    if (isManualReorderDisabled()){
+        toast("请先清除筛选并恢复手动顺序", true);
+        return
+    }
+    const card = state.cards.find(item => item.id === state.currentCardId);
+    if (!card) return;
+    const selectedColumn = Number(document.getElementById("card-column").value);
+    if (selectedColumn !== card.column_id &&["up", "down"].includes(direction)){
+        toast("请先保存所在列变更，再进行上移或下移", true);
+        return
+    }
+    const decision = await confirmDirtyAction("移动");
+    if (decision === "cancel") return;
+    if (decision === "primary" &&!await saveCard()) return;
+    const current = state.cards.find(item => item.id === card.id) || card, targetColumn = Number(document.getElementById("card-column").value || current.column_id), cards = state.cards.filter(item => item.column_id === targetColumn).sort((a, b) => a.position - b.position);
+    let position = current.position;
+    if (direction === "top") position = 0;
+    if (direction === "up") position = Math.max(0, position - 1);
+    if (direction === "down") position = Math.min(cards.length - 1, position + 1);
+    if (direction === "bottom") position = cards.length - 1;
+    try {
+        await api("PUT", `/api/cards/${current.id}/move`, {
+            column_id: targetColumn, position, ...versionPayload(current)
+        });
+        closeCardModal(true);
+        await refresh(true);
+        announce(`卡片 ${current.title} 已移动`)
+    } catch (error){
+        toast("移动失败：" + error.message, true)
+    }
+}
+function normalizedColumnName(value){
+    return (value || "").trim().toLocaleLowerCase()
+}
+function duplicateColumnName(name, excludeId = null){
+    const normalized = normalizedColumnName(name);
+    return state.columns.some(column => column.id !== excludeId && normalizedColumnName(column.name) === normalized)
+}
+function configureColumnModal(column = null){
+    currentColumnEdit = column;
+    const editing = Boolean(column), title = editing ? "重命名列": "新增列", input = document.getElementById("column-name"), close = document.getElementById("column-close-button"), save = document.getElementById("column-save-button");
+    document.getElementById("column-modal-title").textContent = title;
+    close.setAttribute("aria-label", `关闭${title}`);
+    save.textContent = editing ? "保存": "确定";
+    input.value = column?.name || "";
+    state.initialColumnName = input.value
+}
+function addColumn(){
+    configureColumnModal();
+    openModal("column-modal", document.activeElement, "column-name")
+}
+function renameColumn(column){
+    configureColumnModal(column);
+    openModal("column-modal", document.activeElement, "column-name");
+    requestAnimationFrame(() => document.getElementById("column-name").select())
+}
+async function closeColumnModal(force = false){
+    const dirty = document.getElementById("column-name").value !== state.initialColumnName;
+    if (!force && dirty){
+        const decision = await chooseAction({
+            title: "放弃列名修改？", message: "列名尚未保存，关闭后本次修改将丢失。", primary: "放弃修改", secondary: null, danger: true, focus: "cancel"
+        });
+        if (decision !== "primary") return false
+    }
+    hideModal("column-modal");
+    currentColumnEdit = null;
+    return true
+}
+async function saveColumn(){
+    const input = document.getElementById("column-name"), name = input.value.trim(), column = currentColumnEdit;
+    if (!name){
+        toast("列名不能为空", true);
+        input.focus();
+        return
+    }
+    if (duplicateColumnName(name, column?.id ?? null)){
+        toast("列名已存在，请使用其他名称", true);
+        input.focus();
+        return
+    }
+    try {
+        if (column) await api("PUT", `/api/columns/${column.id}`, {
+            name, ...versionPayload(column)
+        });
+        else await api("POST", "/api/columns", {
+            name, expected_board_revision: state.revision
+        });
+        state.initialColumnName = name;
+        await closeColumnModal(true);
+        await refresh(true);
+        toast(column ? "列已更新": "列已创建")
+    } catch (error){
+        toast((column ? "更新失败：": "创建失败：") + error.message, true)
+    }
+}
+async function deleteColumn(column){
+    const count = state.cards.filter(card => card.column_id === column.id).length, opener = document.activeElement, decision = await chooseAction({
+        title: "删除列？", message: `你将删除列“${column.name}”。\n\n当前卡片：${count} 张\n这些卡片将移入历史归档，可在历史归档中恢复。`, primary: "删除列", secondary: null, primaryClass: "ghost", focus: "cancel", opener
+    });
+    if (decision !== "primary") return;
+    try {
+        await api("DELETE", `/api/columns/${column.id}`, versionPayload(column));
+        await refresh(true);
+        toast(`已删除列“${column.name}”`)
+    } catch (error){
+        toast("删除失败：" + error.message, true)
+    }
+}
+function searchConditions(){
+    return ["search-q", "search-priority", "search-from", "search-to", "search-created-from", "search-created-to", "search-updated-from", "search-updated-to"].map(id => document.getElementById(id).value.trim()).join("|") + "|" +(document.getElementById("search-all").checked ? "1": "0") + "|" + state.historySort
+}
+let searchDebounceTimer = null;
+function scheduleSearch(){
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(() => {
+        state.searchAbort?.abort(); doSearch()
+    },
+    300)
+}
+async function doSearch(loadMore = false){
+    const from = document.getElementById("search-from"), to = document.getElementById("search-to"), button = document.querySelector(".history-search-btn"), box = document.getElementById("search-results"), meta = document.getElementById("search-meta");
+    const createdFrom = document.getElementById("search-created-from"), createdTo = document.getElementById("search-created-to"), updatedFrom = document.getElementById("search-updated-from"), updatedTo = document.getElementById("search-updated-to");
+    for (const [f, t, label] of [[from, to, "截止日期"],[createdFrom, createdTo, "创建日期"],[updatedFrom, updatedTo, "更新日期"]]){
+        if (f.value && t.value && f.value > t.value){
+            toast(`${label}：起始日期不能晚于结束日期`, true);
+            f.focus();
+            return
+        }
+    }
+    if (!loadMore){
+        state.searchAbort?.abort();
+        state.searchAbort = new AbortController();
+        state.searchCursor = null;
+        state.searchConditions = searchConditions();
+        state.searchResults = new Map()
+    } else if (state.searchCursor && searchConditions() !== state.searchConditions){
+        state.searchCursor = null;
+        state.searchConditions = searchConditions()
+    }
+    const params = new URLSearchParams();
+    [["q", "search-q"],["priority", "search-priority"],["from", "search-from"],["to", "search-to"],["created_from", "search-created-from"],["created_to", "search-created-to"],["updated_from", "search-updated-from"],["updated_to", "search-updated-to"]].forEach(([key, id]) => {
+        const value = document.getElementById(id).value.trim(); if (value) params.set(key, value)
+    });
+    params.set("sort", state.historySort);
+    if (document.getElementById("search-all").checked) params.set("all", "1");
+    if (loadMore && state.searchCursor) params.set("cursor", state.searchCursor);
+    setBusy(button, true, loadMore ? "加载中…": "搜索中…");
+    box.setAttribute("aria-busy", "true");
+    try {
+        const result = await api("GET", "/api/search?" + params, undefined, {
+            signal: state.searchAbort?.signal
+        });
+        state.searchCursor = result.next_cursor;
+        if (!loadMore) clearChildren(box);
+        result.items.forEach(card => {
+            state.searchResults.set(card.id, card); box.appendChild(renderResult(card))
+        });
+        box.querySelector(".search-load-more")?.remove();
+        if (result.has_more){
+            const more = document.createElement("button");
+            more.type = "button";
+            more.className = "ghost search-load-more";
+            more.textContent = "加载更多";
+            more.onclick =() => doSearch(true);
+            box.appendChild(more)
+        }
+        meta.textContent = `已显示 ${box.querySelectorAll(".result-item").length} 条结果 · ${HISTORY_SORT_OPTIONS.get(state.historySort)}`;
+        if (!result.items.length &&!loadMore) box.textContent = "无匹配结果"
+    } catch (error){
+        if (error.name !== "AbortError"){
+            meta.textContent = "搜索失败";
+            box.innerHTML = '<div class="inline-error">搜索失败，请重试。</div>';
+            toast("搜索失败：" + error.message, true)
+        }
+    } finally {
+        box.setAttribute("aria-busy", "false");
+        setBusy(button, false)
+    }
+}
+function highlightKeywordNodes(root, terms){
+    if (!terms.length) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes =[];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(node => {
+        const text = node.data; if (!text.trim()) return; let html = null, lastIndex = 0; for (const {
+            index, length
+        }
+        of findAllMatches(text, terms)){
+            if (!html) html = ""; html += escapeHtmlText(text.slice(lastIndex, index)) + "<mark>" + escapeHtmlText(text.slice(index, index + length)) + "</mark>"; lastIndex = index + length
+        }
+        if (html){
+            html += escapeHtmlText(text.slice(lastIndex)); const span = document.createElement("span"); span.innerHTML = html; node.replaceWith(...span.childNodes)
+        }
+    })
+}
+function findAllMatches(text, terms){
+    const matches =[];
+    const lower = text.toLocaleLowerCase();
+    for (const term of terms){
+        let pos = 0;
+        while ((pos = lower.indexOf(term, pos)) !== - 1){
+            matches.push({
+                index: pos, length: term.length
+            });
+            pos += term.length
+        }
+    }
+    matches.sort((a, b) => a.index - b.index || b.length - a.length);
+    const merged =[];
+    for (const m of matches){
+        const last = merged[merged.length - 1];
+        if (last && m.index < last.index + last.length){
+            if (m.index + m.length > last.index + last.length) last.length = m.index + m.length - last.index
+        } else merged.push({
+            ...m
+        })
+    }
+    return merged
+}
+function escapeHtmlText(value){
+    return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+function highlightPlainText(text, terms){
+    if (!terms.length) return escapeHtmlText(text);
+    let html = "", lastIndex = 0;
+    for (const {
+        index, length
+    }
+    of findAllMatches(text, terms)){
+        html += escapeHtmlText(text.slice(lastIndex, index)) + "<mark>" + escapeHtmlText(text.slice(index, index + length)) + "</mark>";
+        lastIndex = index + length
+    }
+    html += escapeHtmlText(text.slice(lastIndex));
+    return html
+}
+function renderHistoryBatchBar(){
+    const bar = document.getElementById("history-batch-bar");
+    if (!bar) return;
+    const count = state.batchSelected.size;
+    bar.hidden = count === 0;
+    document.getElementById("history-batch-count").textContent = `已选 ${count} 张`
+}
+function toggleHistoryBatch(card, checked){
+    if (checked) state.batchSelected.add(card.id);
+    else state.batchSelected.delete (card.id);
+    renderHistoryBatchBar()
+}
+function selectAllHistoryPage(){
+    document.querySelectorAll(".result-item input.history-select-box").forEach(input => {
+        const card = state.searchResults.get(Number(input.closest(".result-item")?.dataset.cardId)); if (card){
+            state.batchSelected.add(card.id); input.checked = true
+        }
+    });
+    renderHistoryBatchBar();
+    announce(`已全选本页 ${state.batchSelected.size} 张卡片`)
+}
+function selectedBatchItems(){
+    const items =[];
+    for (const id of state.batchSelected){
+        const card = state.searchResults.get(id) || state.cards.find(card => card.id === id);
+        if (card) items.push({
+            id: card.id, version: card.version
+        })
+    }
+    return items
+}
+async function batchRestoreSelected(){
+    const items = selectedBatchItems();
+    if (!items.length) return;
+    const decision = await chooseAction({
+        title: "批量恢复卡片？", message: `将恢复 ${items.length} 张已选卡片到各自原列；原列已删除时恢复到同名列或第一个活跃列。`, primary: `恢复 ${items.length} 张`, secondary: null, focus: "cancel"
+    });
+    if (decision !== "primary") return;
+    try {
+        const result = await api("POST", "/api/cards/batch/restore", {
+            items, expected_board_revision: state.revision
+        });
+        state.revision = result.revision;
+        state.batchSelected.clear();
+        renderHistoryBatchBar();
+        await refresh(true);
+        await doSearch();
+        toast(`已恢复 ${result.count} 张卡片`)
+    } catch (error){
+        toast("批量恢复失败：" + error.message, true)
+    }
+}
+async function batchDeleteSelected(){
+    const items = selectedBatchItems();
+    if (!items.length) return;
+    const first = await chooseAction({
+        title: "批量永久删除卡片？", message: `将永久删除 ${items.length} 张已选卡片及其附件，此操作不可撤销、不能从历史恢复。`, primary: "继续删除", secondary: null, primaryClass: "ghost", focus: "cancel"
+    });
+    if (first !== "primary") return;
+    const second = await chooseAction({
+        title: "最后确认：无法恢复", message: `确认永久删除 ${items.length} 张卡片及其全部附件？此操作立即生效且无撤销。`, primary: "永久删除", secondary: null, primaryClass: "ghost", focus: "cancel"
+    });
+    if (second !== "primary") return;
+    try {
+        const result = await api("POST", "/api/cards/batch/permanent-delete", {
+            items, expected_board_revision: state.revision
+        });
+        state.revision = result.revision;
+        state.batchSelected.clear();
+        renderHistoryBatchBar();
+        await refresh(true);
+        await doSearch();
+        toast(`已永久删除 ${result.count} 张卡片`)
+    } catch (error){
+        toast("批量删除失败：" + error.message, true)
+    }
+}
+function renderBoardBatchBar(){
+    const bar = document.getElementById("board-batch-bar"), toggle = document.getElementById("board-batch-toggle");
+    if (!bar ||!toggle) return;
+    const count = state.batchSelected.size;
+    bar.hidden =!state.batchMode || count === 0;
+    document.getElementById("board-batch-count").textContent = `已选 ${count} 张`;
+    toggle.classList.toggle("active", state.batchMode);
+    toggle.textContent = state.batchMode ? "退出选择": "批量选择"
+}
+function toggleBoardBatchMode(){
+    state.batchMode =!state.batchMode;
+    if (!state.batchMode) state.batchSelected.clear();
+    renderBoard();
+    renderBoardBatchBar();
+    if (state.batchMode) announce("已进入批量选择模式，点击卡片进行多选")
+}
+function toggleBoardBatch(card){
+    if (state.batchSelected.has(card.id)) state.batchSelected.delete (card.id);
+    else state.batchSelected.add(card.id);
+    const cardEl = document.querySelector(`.card[data-card-id="${card.id}"]`);
+    cardEl?.classList.toggle("batch-selected", state.batchSelected.has(card.id));
+    const box = cardEl?.querySelector(".card-select-box");
+    if (box) box.checked = state.batchSelected.has(card.id);
+    renderBoardBatchBar()
+}
+async function batchArchiveSelected(){
+    const items = selectedBatchItems();
+    if (!items.length) return;
+    const decision = await chooseAction({
+        title: "批量归档卡片？", message: `将归档 ${items.length} 张已选卡片到历史归档，之后可以恢复。`, primary: `归档 ${items.length} 张`, secondary: null, focus: "cancel"
+    });
+    if (decision !== "primary") return;
+    try {
+        const result = await api("POST", "/api/cards/batch/archive", {
+            items, expected_board_revision: state.revision
+        });
+        state.revision = result.revision;
+        state.batchMode = false;
+        state.batchSelected.clear();
+        renderBoardBatchBar();
+        await refresh(true);
+        toast(`已归档 ${result.count} 张卡片`)
+    } catch (error){
+        toast("批量归档失败：" + error.message, true)
+    }
+}
+function exitBoardBatchMode(){
+    if (!state.batchMode) return;
+    state.batchMode = false;
+    state.batchSelected.clear();
+    renderBoard();
+    renderBoardBatchBar()
+}
+function renderResult(card){
+    const element = document.createElement("div");
+    element.className = "result-item priority-" + card.priority;
+    element.dataset.cardId = card.id;
+    element.tabIndex = 0;
+    element.setAttribute("role", "button");
+    element.setAttribute("aria-label", `编辑卡片“${card.title}”`);
+    element.addEventListener("click", event => {
+        if (event.target.closest("button, input, select, label")) return;
+        openEditCard(card.id)
+    });
+    element.addEventListener("keydown", event => {
+        if ((event.key === "Enter" || event.key === " ") && event.target === element){
+            event.preventDefault();
+            openEditCard(card.id)
+        }
+    });
+    const query =(document.getElementById("search-q").value || "").trim();
+    const terms = query ? query.toLocaleLowerCase().split(/\s+/).filter(Boolean):[];
+    const title = document.createElement("div");
+    title.className = "result-title";
+    title.innerHTML = highlightPlainText(card.title +(card.archived ? " [已归档]": ""), terms);
+    element.appendChild(title);
+    if (card.description){
+        const description = document.createElement("div");
+        description.className = "result-desc";
+        description.innerHTML = card.description;
+        highlightKeywordNodes(description, terms);
+        element.appendChild(description)
+    }
+    const meta = document.createElement("div");
+    meta.className = "result-meta";
+    meta.textContent =[`优先级：${priorityLabel(card.priority)}`, card.labels && `标签：${card.labels}`, card.due_date && `截止：${card.due_date}`, card.attachment_count && `附件：${card.attachment_count} 个`, card.column_name && `原列：${card.column_name}${card.column_deleted?"（已删除）":""}`].filter(Boolean).join("　|　");
+    element.appendChild(meta);
+    const times = document.createElement("div");
+    times.className = "result-times";
+    times.textContent = `创建：${fullTimestamp(card.created_at)} | 更新：${fullTimestamp(card.updated_at)}`;
+    element.appendChild(times);
+    if (card.attachment_count){
+        const attachmentActions = document.createElement("div");
+        attachmentActions.className = "result-actions";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost";
+        button.textContent = "查看附件";
+        button.setAttribute("aria-expanded", "false");
+        const box = document.createElement("div");
+        box.className = "history-attachments";
+        box.hidden = true;
+        button.onclick =() => toggleResultAttachments(card, button, box);
+        attachmentActions.appendChild(button);
+        element.append(attachmentActions, box)
+    }
+    if (card.archived){
+        const selectBox = document.createElement("input");
+        selectBox.type = "checkbox";
+        selectBox.className = "history-select-box";
+        selectBox.setAttribute("aria-label", `选择卡片“${card.title}”`);
+        selectBox.checked = state.batchSelected.has(card.id);
+        selectBox.onchange =() => toggleHistoryBatch(card, selectBox.checked);
+        element.appendChild(selectBox);
+        const actions = document.createElement("div");
+        actions.className = "result-actions history-card-actions";
+        if (card.column_deleted &&!card.restore_column_id){
+            const label = document.createElement("label");
+            label.className = "restore-target-label";
+            label.textContent = "恢复到";
+            const select = document.createElement("select");
+            select.setAttribute("aria-label", `选择“${card.title}”的恢复列`);
+            state.columns.slice().sort((a, b) => a.position - b.position).forEach(column => {
+                const option = document.createElement("option"); option.value = column.id; option.textContent = column.name; select.appendChild(option)
+            });
+            label.appendChild(select);
+            const button = document.createElement("button");
+            button.textContent = "↩ 恢复";
+            button.setAttribute("aria-label", `恢复卡片“${card.title}”`);
+            button.onclick =() => restoreCard(card, Number(select.value));
+            actions.append(label, button)
+        } else {
+            const target = state.columns.find(column => column.id === card.restore_column_id), button = document.createElement("button");
+            button.textContent = `↩ 恢复到“${target?.name||card.column_name||"原列"}”`;
+            button.setAttribute("aria-label", `恢复卡片“${card.title}”`);
+            button.onclick =() => restoreCard(card, card.restore_column_id || undefined);
+            actions.appendChild(button)
+        }
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "icon-btn history-permanent-delete";
+        remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg>';
+        remove.title = "永久删除卡片";
+        remove.setAttribute("aria-label", `永久删除卡片“${card.title}”`);
+        remove.onclick =() => permanentlyDeleteCard(card, {
+            fromHistory: true, unsaved: false
+        });
+        actions.appendChild(remove);
+        element.appendChild(actions)
+    }
+    if (!card.archived){
+        const actions = document.createElement("div");
+        actions.className = "result-actions history-card-actions";
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "icon-btn history-permanent-delete";
+        remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 11v6m6-6v6M8 7l1-3h6l1 3m2 0-1 14H7L6 7"/></svg>';
+        remove.title = "永久删除卡片";
+        remove.setAttribute("aria-label", `永久删除卡片“${card.title}”`);
+        remove.onclick =() => permanentlyDeleteCard(card, {
+            fromHistory: true, unsaved: false
+        });
+        actions.appendChild(remove);
+        element.appendChild(actions)
+    }
+    return element
+}
+async function restoreCard(card, targetColumnId){
+    const payload = {
+        expected_version: card.version, expected_board_revision: state.revision
+    };
+    if (targetColumnId) payload.target_column_id = targetColumnId;
+    try {
+        await api("POST", `/api/cards/${card.id}/restore`, payload);
+        await refresh(true);
+        await doSearch();
+        const target = targetColumnId && state.columns.find(column => column.id === targetColumnId);
+        toast(target ? `已恢复到“${target.name}”`: "已恢复到原列")
+    } catch (error){
+        toast("恢复失败：" + error.message, true)
+    }
+}
+function resetSearch(){
+    for (const id of ["search-q", "search-priority", "search-from", "search-to", "search-created-from", "search-created-to", "search-updated-from", "search-updated-to"]) document.getElementById(id).value = "";
+    document.getElementById("search-all").checked = true;
+    syncHistoryDateControl();
+    clearChildren(document.getElementById("search-results"));
+    document.getElementById("search-meta").textContent = "";
+    state.searchResults = new Map();
+    state.batchSelected.clear();
+    renderHistoryBatchBar()
+}
+function download(url){
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove()
+}
+function downloadBlob(blob, fileName){
+    const url = URL.createObjectURL(blob), anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+function responseFileName(response, fallback){
+    const value = response.headers.get("Content-Disposition") || "", utf8 = value.match(/filename\*=UTF-8''([^;]+)/i), plain = value.match(/filename="?([^";]+)"?/i);
+    try {
+        return decodeURIComponent(utf8?.[1] || plain?.[1] || fallback)
+    } catch (_){
+        return fallback
+    }
+}
+function exportJson(){
+    download("/api/export");
+    toast("正在导出 JSON；附件文件不包含在内，完整迁移请使用 ZIP 备份。", {
+        duration: 5000
+    })
+}
+function errorDetails(details){
+    return Object.entries(details || {}).map(([key, value]) => `${key}：${Array.isArray(value)?value.slice(0,5).join("、")+(value.length>5?` 等 ${value.length} 项`:""):typeof value==="object"?JSON.stringify(value):value}`).join("\n")
+}
+function responseError(payload, fallback, incompleteNote = ""){
+    const error = payload?.error || {}, missing = error.details?.missing_attachments;
+    if (error.code === "INCOMPLETE_BACKUP" && Array.isArray(missing)){
+        const paths = missing.slice(0, 5).join("\n");
+        return `${error.message||fallback}\n缺失附件：${missing.length} 个${paths?`\n${paths}${missing.length>5?`\n另有 ${missing.length-5} 个未列出`:""}`:""}${incompleteNote?`\n${incompleteNote}`:""}`
+    }
+    const details = errorDetails(error.details);
+    return `${error.message||fallback}${details?`\n${details}`:""}`
+}
+async function backupDb(){
+    if (state.busyOperation) return;
+    state.busyOperation = "backup";
+    document.body.setAttribute("aria-busy", "true");
+    toast("正在检查完整备份所需附件…", {
+        duration: 10000
+    });
+    try {
+        const check = await fetch("/api/backup/check");
+        if (!check.ok){
+            const payload = await check.json().catch (() => null);
+            throw new Error(responseError(payload, `完整备份检查失败（HTTP ${check.status}）`, "未生成完整备份。"))
+        }
+        toast("正在生成完整 ZIP 备份…", {
+            duration: 15000
+        });
+        const response = await fetch("/api/backup");
+        if (!response.ok){
+            const payload = await response.json().catch (() => null);
+            throw new Error(responseError(payload, `完整备份生成失败（HTTP ${response.status}）`, "未生成完整备份。"))
+        }
+        const blob = await response.blob(), fileName = responseFileName(response, "kanban-backup.zip");
+        downloadBlob(blob, fileName);
+        toast("完整 ZIP 备份已生成并开始下载", {
+            duration: 8000
+        })
+    } catch (error){
+        toast("备份失败：" + error.message, true)
+    } finally {
+        state.busyOperation = "";
+        document.body.setAttribute("aria-busy", "false")
+    }
+}
+function selectImportFile(){
+    document.getElementById("import-file").click()
+}
+async function importBackupFile(file){
+    if (!file || state.busyOperation) return;
+    state.busyOperation = "import";
+    document.body.setAttribute("aria-busy", "true");
+    try {
+        if (file.name.toLowerCase().endsWith(".zip") || file.type === "application/zip"){
+            toast("正在上传并校验完整备份…", {
+                duration: 10000
+            });
+            const response = await fetch("/api/import/zip/preview", {
+                method: "POST", body: file
+            })
+            , preview = await response.json().catch (() => null);
+            if (!response.ok) throw new Error(responseError(preview, `备份预览失败（HTTP ${response.status}）`));
+            if (!preview) throw new Error("备份预览响应格式无效");
+            const message = `恢复将替换当前看板数据，操作前会自动创建一份完整 ZIP 备份。\n\n备份时间：${preview.created_at||"未知时间"}\n列：${preview.columns}\n活跃卡片：${preview.cards}\n历史归档：${preview.archived_cards}\n附件：${preview.attachments} 个\n附件总大小：${formatBytes(preview.attachment_size)}\n哈希校验：${preview.hash_verified?"已通过":"旧版备份未提供"}`, decision = await chooseAction({
+                title: "恢复完整备份？", message, primary: "恢复完整备份", secondary: null, danger: true, focus: "cancel", opener: document.getElementById("import-button")
+            });
+            if (decision !== "primary") return;
+            toast("正在恢复完整备份，请勿关闭页面…", {
+                duration: 15000
+            });
+            await api("POST", "/api/import/zip", {
+                token: preview.token, expected_board_revision: state.revision
+            });
+            await refresh(true);
+            toast("完整备份恢复完成");
+            return
+        }
+        toast("正在读取 JSON…", {
+            duration: 8000
+        });
+        const data = JSON.parse(await file.text()), preview = await api("POST", "/api/import/preview", data), warning = preview.attachments_ignored ? `JSON 中的 ${preview.attachments_ignored} 条附件信息不会导入，因为 JSON 不包含附件文件。`: "JSON 不包含附件文件。", message = `导入将替换当前看板数据，操作前会自动创建一份完整 ZIP 备份。\n\n列：${preview.columns}\n活跃卡片：${preview.cards}\n历史归档：${preview.archived_cards}\n\n${warning}`, decision = await chooseAction({
+            title: "导入 JSON 并替换当前数据？", message, primary: "导入 JSON", secondary: null, danger: true, focus: "cancel", opener: document.getElementById("import-button")
+        });
+        if (decision !== "primary") return;
+        toast("正在导入数据，请勿关闭页面…", {
+            duration: 15000
+        });
+        await api("POST", "/api/import", {
+            data, expected_board_revision: state.revision
+        });
+        await refresh(true);
+        toast("JSON 导入完成")
+    } catch (error){
+        toast("导入失败：" + error.message, true)
+    } finally {
+        state.busyOperation = "";
+        document.body.setAttribute("aria-busy", "false");
+        document.getElementById("import-file").value = ""
+    }
+}
+const DEFAULT_THEME = "mint", THEMES =(window.__KANBAN_THEMES__ ||[]).map(theme => theme.value), LEGACY_THEMES = window.__KANBAN_LEGACY_THEMES__ || {};
+function renderThemeOptions(){
+    const box = document.getElementById("theme-options");
+    if (!box) return;
+    clearChildren(box);
+    for (const theme of window.__KANBAN_THEMES__ ||[]){
+        const label = document.createElement("label"), input = document.createElement("input");
+        input.type = "radio";
+        input.name = "theme";
+        input.value = theme.value;
+        input.dataset.themeValue = theme.value;
+        const content = document.createElement("span");
+        content.className = "theme-option-content";
+        const swatch = document.createElement("span");
+        swatch.className = "theme-swatch " + theme.swatch;
+        swatch.setAttribute("aria-hidden", "true");
+        const name = document.createElement("span");
+        name.textContent = theme.label;
+        const check = document.createElement("span");
+        check.className = "theme-check";
+        check.setAttribute("aria-hidden", "true");
+        check.textContent = "✓";
+        content.append(swatch, name, check);
+        label.append(input, content);
+        box.appendChild(label)
+    }
+}
+function normalizeTheme(value){
+    const normalized = LEGACY_THEMES[value] || value;
+    return THEMES.includes(normalized) ? normalized: DEFAULT_THEME
+}
+function currentTheme(){
+    return normalizeTheme(document.documentElement.dataset.theme)
+}
+function updateThemeMenu(){
+    const selected = currentTheme();
+    document.documentElement.dataset.theme = selected;
+    document.querySelectorAll("[data-theme-value]").forEach(input => input.checked = input.dataset.themeValue === selected)
+}
+function setTheme(theme){
+    const normalized = normalizeTheme(theme);
+    if (theme !== normalized &&!THEMES.includes(theme)) return;
+    document.documentElement.dataset.theme = normalized;
+    try {
+        localStorage.setItem("kanban-theme", normalized)
+    } catch (_){}
+    updateThemeMenu();
+    updateFavicon();
+    announce("主题已切换")
+}
+function closeOpenMenusFromPointer(event){
+    const target = event.target;
+    if (historySortOpen &&!target.closest(".history-sort")){
+        historySortOpen = false;
+        renderHistorySort()
+    }
+    if (openSortColumnId !== null &&!target.closest(".column-sort-button") &&!target.closest(".column-sort-menu")){
+        openSortColumnId = null;
+        renderBoard()
+    }
+    if (openColorMenu &&!target.closest(".rich-color-picker")) closeColorMenu();
+    if (openThemedSelect &&!target.closest(".themed-select")) closeThemedSelect()
+}
+function closeThemedSelect(restoreFocus = false){
+    if (!openThemedSelect) return;
+    const wrapper = openThemedSelect, button = wrapper.querySelector(".themed-select-button"), menu = wrapper.querySelector(".themed-select-menu");
+    menu.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    openThemedSelect = null;
+    if (restoreFocus) button.focus()
+}
+function syncThemedSelect(select){
+    const wrapper = select.closest(".themed-select");
+    if (!wrapper) return;
+    const button = wrapper.querySelector(".themed-select-button"), menu = wrapper.querySelector(".themed-select-menu"), selected = select.options[select.selectedIndex];
+    button.textContent = selected?.textContent || "请选择";
+    clearChildren(menu);
+    [...select.options].forEach(option => {
+        const item = document.createElement("button"); item.type = "button"; item.setAttribute("role", "option"); item.setAttribute("aria-selected", String(option.value === select.value)); item.dataset.value = option.value; item.textContent = option.textContent; item.onclick =() => {
+            select.value = option.value; select.dispatchEvent(new Event("change", {
+                bubbles: true
+            })
+            ); syncThemedSelect(select); closeThemedSelect(true)
+        };
+        menu.appendChild(item)
+    })
+}
+function setupThemedSelects(){
+    document.querySelectorAll(".themed-select").forEach(wrapper => {
+        const select = wrapper.querySelector("select"), button = wrapper.querySelector(".themed-select-button"), menu = wrapper.querySelector(".themed-select-menu"); syncThemedSelect(select); button.addEventListener("click",() => {
+            const opening = openThemedSelect !== wrapper; closeThemedSelect(); if (!opening) return; openThemedSelect = wrapper; syncThemedSelect(select); menu.hidden = false; button.setAttribute("aria-expanded", "true"); requestAnimationFrame(() => menu.querySelector('[aria-selected="true"]')?.focus())
+        });
+        menu.addEventListener("keydown", event => {
+            const items =[...menu.querySelectorAll("button")], index = items.indexOf(document.activeElement); let next = index; if (event.key === "ArrowDown") next =(index + 1) % items.length; else if (event.key === "ArrowUp") next =(index - 1 + items.length) % items.length; else if (event.key === "Home") next = 0; else if (event.key === "End") next = items.length - 1; else if (event.key === "Escape"){
+                event.preventDefault(); closeThemedSelect(true); return
+            } else
+            return; event.preventDefault(); items[next].focus()
+        });
+        select.addEventListener("change",() => syncThemedSelect(select))
+    })
+}
+function updateFavicon(){
+    try {
+        const cs = getComputedStyle(document.documentElement);
+        const primary =(cs.getPropertyValue("--primary") || "#0079bf").trim();
+        const primaryHover =(cs.getPropertyValue("--primary-hover") || primary).trim();
+        const onAccent =(cs.getPropertyValue("--text-on-accent") || "#ffffff").trim();
+        const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='bg' x1='8' y1='6' x2='56' y2='58' gradientUnits='userSpaceOnUse'><stop stop-color='" + primary + "'/><stop offset='1' stop-color='" + primaryHover + "'/></linearGradient></defs><rect x='2' y='2' width='60' height='60' rx='16' fill='url(#bg)'/><g fill='none' stroke='" + onAccent + "' stroke-width='4.5' stroke-linejoin='round'><rect x='13' y='13' width='15' height='15' rx='3'/><rect x='36' y='13' width='15' height='10' rx='3'/><rect x='36' y='31' width='15' height='20' rx='3'/><rect x='13' y='36' width='15' height='15' rx='3'/></g></svg>";
+        const href = "data:image/svg+xml," + encodeURIComponent(svg);
+        document.querySelectorAll("link[rel='icon']").forEach(link => link.remove());
+        const link = document.createElement("link");
+        link.rel = "icon";
+        link.type = "image/svg+xml";
+        link.href = href;
+        document.head.appendChild(link)
+    } catch (_){}
+}
+function activeModal(){
+    return [...document.querySelectorAll(".modal-overlay:not([hidden])")].pop()
+}
+function trapModalKey(event){
+    const overlay = activeModal();
+    if (!overlay || event.key !== "Tab") return;
+    const focusable =[...overlay.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),[contenteditable="true"],[tabindex]:not([tabindex="-1"])')].filter(node =>!node.hidden && node.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first){
+        event.preventDefault();
+        last.focus()
+    } else if (!event.shiftKey && document.activeElement === last){
+        event.preventDefault();
+        first.focus()
+    }
+}
+function setupStaticActions(){
+    document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click",() => {
+        void showView(button.dataset.view)
+    })
+    );
+    document.getElementById("settings-button").addEventListener("click",() => {
+        void showView("settings")
+    });
+    document.getElementById("settings-back-button").addEventListener("click",() => {
+        void showView("board")
+    });
+    document.getElementById("import-button").addEventListener("click", selectImportFile);
+    document.getElementById("export-button").addEventListener("click", exportJson);
+    document.getElementById("backup-button").addEventListener("click", backupDb);
+    document.querySelectorAll("[data-theme-value]").forEach(input => input.addEventListener("change",() => {
+        if (input.checked) setTheme(input.dataset.themeValue)
+    })
+    );
+    document.querySelectorAll('input[name="card-description-display"]').forEach(input => input.addEventListener("change",() => {
+        if (input.checked) setCardDescriptionDisplay(input.value)
+    })
+    );
+    document.getElementById("add-column-button").addEventListener("click", addColumn);
+    document.getElementById("clear-filters").addEventListener("click", clearBoardFilters);
+    document.getElementById("board-batch-toggle").addEventListener("click", toggleBoardBatchMode);
+    document.getElementById("board-batch-archive").addEventListener("click", batchArchiveSelected);
+    document.getElementById("board-batch-exit").addEventListener("click", exitBoardBatchMode);
+    document.getElementById("history-batch-select-page").addEventListener("click", selectAllHistoryPage);
+    document.getElementById("history-batch-restore").addEventListener("click", batchRestoreSelected);
+    document.getElementById("history-batch-delete").addEventListener("click", batchDeleteSelected);
+    document.getElementById("history-batch-clear").addEventListener("click",() => {
+        state.batchSelected.clear(); document.querySelectorAll(".history-select-box").forEach(input => input.checked = false); renderHistoryBatchBar()
+    });
+    document.getElementById("today-quick-add").addEventListener("submit", quickAddToday);
+    document.getElementById("search-q").addEventListener("keydown", event => {
+        if (event.key === "Enter") doSearch()
+    });
+    document.getElementById("search-from-trigger").addEventListener("click", event => openDateTimePicker("search-from", event.currentTarget));
+    document.getElementById("search-to-trigger").addEventListener("click", event => openDateTimePicker("search-to", event.currentTarget));
+    document.getElementById("search-from").addEventListener("input",() => syncHistoryDateControl("from"));
+    document.getElementById("search-to").addEventListener("input",() => syncHistoryDateControl("to"));
+    document.getElementById("search-from-clear").addEventListener("click",() => {
+        clearHistoryDate("from"); scheduleSearch()
+    });
+    document.getElementById("search-to-clear").addEventListener("click",() => {
+        clearHistoryDate("to"); scheduleSearch()
+    });
+    document.getElementById("search-created-from-trigger").addEventListener("click", event => openDateTimePicker("search-created-from", event.currentTarget));
+    document.getElementById("search-created-to-trigger").addEventListener("click", event => openDateTimePicker("search-created-to", event.currentTarget));
+    document.getElementById("search-created-from").addEventListener("input",() => syncHistoryDateControl("created_from"));
+    document.getElementById("search-created-to").addEventListener("input",() => syncHistoryDateControl("created_to"));
+    document.getElementById("search-created-from-clear").addEventListener("click",() => {
+        clearHistoryDate("created_from"); scheduleSearch()
+    });
+    document.getElementById("search-created-to-clear").addEventListener("click",() => {
+        clearHistoryDate("created_to"); scheduleSearch()
+    });
+    document.getElementById("search-updated-from-trigger").addEventListener("click", event => openDateTimePicker("search-updated-from", event.currentTarget));
+    document.getElementById("search-updated-to-trigger").addEventListener("click", event => openDateTimePicker("search-updated-to", event.currentTarget));
+    document.getElementById("search-updated-from").addEventListener("input",() => syncHistoryDateControl("updated_from"));
+    document.getElementById("search-updated-to").addEventListener("input",() => syncHistoryDateControl("updated_to"));
+    document.getElementById("search-updated-from-clear").addEventListener("click",() => {
+        clearHistoryDate("updated_from"); scheduleSearch()
+    });
+    document.getElementById("search-updated-to-clear").addEventListener("click",() => {
+        clearHistoryDate("updated_to"); scheduleSearch()
+    });
+    document.getElementById("history-sort-button").addEventListener("click", toggleHistorySort);
+    document.querySelector(".history-search-btn").addEventListener("click",() => doSearch());
+    document.getElementById("card-archive-button").addEventListener("click", archiveCurrentCard);
+    document.getElementById("card-permanent-delete-button").addEventListener("click", permanentlyDeleteCurrentCard);
+    document.getElementById("card-close-button").addEventListener("click",() => closeCardModal());
+    document.getElementById("card-date-trigger").addEventListener("click", event => openDateTimePicker("card-due", event.currentTarget));
+    document.getElementById("card-due").addEventListener("input", syncCardDateControl);
+    document.getElementById("card-date-clear").addEventListener("click", clearCardDate);
+    document.getElementById("card-time-trigger").addEventListener("click", event => openDateTimePicker("card-due-time", event.currentTarget));
+    document.getElementById("card-due-time").addEventListener("input", syncCardTimeControl);
+    document.getElementById("card-time-clear").addEventListener("click", clearCardTime);
+    document.querySelectorAll("[data-move-direction]").forEach(button => button.addEventListener("click",() => moveCurrentCard(button.dataset.moveDirection)));
+    document.getElementById("card-column").addEventListener("change",() => {
+        const select = document.getElementById("card-column"), column = state.columns.find(item => item.id === Number(select.value)); if (!column) return; const meta = document.getElementById("card-meta"); if (column.id === state.currentCardCol) meta.textContent = `卡片将保留在“${column.name}”列当前位置`; else meta.textContent = `保存后卡片将移至“${column.name}”列末尾${isManualReorderDisabled()?"（当前有筛选，保存后位置为列尾）":""}`
+    });
+    document.getElementById("attachment-add-button").addEventListener("click", selectAttachments);
+    document.getElementById("card-cancel-button").addEventListener("click",() => closeCardModal());
+    document.querySelector(".card-save-btn").addEventListener("click", saveCard);
+    document.getElementById("column-close-button").addEventListener("click",() => closeColumnModal());
+    document.getElementById("column-cancel-button").addEventListener("click",() => closeColumnModal());
+    document.getElementById("column-save-button").addEventListener("click", saveColumn);
+}
+document.addEventListener("DOMContentLoaded",() => {
+    setupButtonTooltips(); loadSortPreferences(); loadHistorySortPreference(); loadCardDescriptionPreference(); renderHistorySort(); renderCardDescriptionPreference(); renderThemeOptions(); updateThemeMenu(); updateFavicon(); setupViewTabs(); setupStaticActions(); renderBoardBatchBar(); refresh(true); setupBoardColumnDrop(); setupEditorToolbar(); setupThemedSelects(); document.addEventListener("pointerdown", closeOpenMenusFromPointer, true); document.getElementById("import-file").addEventListener("change", event => importBackupFile(event.target.files[0])); document.getElementById("attachment-input").addEventListener("change", event => queueAttachments(event.target.files)); document.getElementById("search-from").addEventListener("change",() => syncHistoryDateControl("from")); document.getElementById("search-to").addEventListener("change",() => syncHistoryDateControl("to")); document.getElementById("search-created-from").addEventListener("change",() => syncHistoryDateControl("created_from")); document.getElementById("search-created-to").addEventListener("change",() => syncHistoryDateControl("created_to")); document.getElementById("search-updated-from").addEventListener("change",() => syncHistoryDateControl("updated_from")); document.getElementById("search-updated-to").addEventListener("change",() => syncHistoryDateControl("updated_to")); syncHistoryDateControl(); document.getElementById("search-q").addEventListener("input", scheduleSearch); document.getElementById("search-priority").addEventListener("change", scheduleSearch); document.getElementById("search-all").addEventListener("change", scheduleSearch); for (const id of ["search-from", "search-to", "search-created-from", "search-created-to", "search-updated-from", "search-updated-to"]){
+        document.getElementById(id).addEventListener("input", scheduleSearch); document.getElementById(id).addEventListener("change", scheduleSearch)
+    }
+    document.addEventListener("click", event => {
+        if (state.quickCreate.columnId !== null &&!event.target.closest(".quick-card-form") &&!event.target.closest(".add-card-btn")){
+            state.quickCreate = {
+                columnId: null, title: "", submitting: false
+            };
+            renderBoard()
+        }
+    });
+    document.addEventListener("keydown", event => {
+        trapModalKey(event); if ((event.ctrlKey || event.metaKey) && event.key === "Enter" &&!event.isComposing &&!document.getElementById("card-modal").hidden){
+            event.preventDefault(); saveCard()
+        }
+        if (event.key === "Escape" &&!event.isComposing){
+            if (state.batchMode){
+                exitBoardBatchMode(); return
+            }
+            if (!document.getElementById("choice-modal").hidden){
+                document.getElementById("choice-cancel").click(); return
+            }
+            if (historySortOpen){
+                historySortOpen = false; renderHistorySort(); document.getElementById("history-sort-button").focus(); return
+            }
+            if (openSortColumnId !== null){
+                const columnId = openSortColumnId; openSortColumnId = null; renderBoard(); requestAnimationFrame(() => document.querySelector(`.column[data-col-id="${columnId}"] .column-sort-button`)?.focus()); return
+            }
+            if (!document.getElementById("card-modal").hidden) closeCardModal(); else if (!document.getElementById("column-modal").hidden) closeColumnModal()
+        }
+    });
+    window.addEventListener("beforeunload", event => {
+        if (state.busyOperation || isCardDirty() || attachmentWorkPending() ||(!document.getElementById("column-modal").hidden && document.getElementById("column-name").value !== state.initialColumnName)){
+            event.preventDefault(); event.returnValue = ""
+        }
+    })
+});

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="sea-salt-blue">
+<html lang="zh-CN" data-theme="mint">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -19,6 +19,7 @@
         </div>
         <div class="topbar-center view-tabs" role="tablist" aria-label="主要视图">
             <button id="btn-board" data-view="board" class="nav-btn active" role="tab" aria-selected="true" aria-controls="view-board" tabindex="0">看板</button>
+            <button id="btn-today" data-view="today" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-today" tabindex="-1"><span>今日</span><span id="today-tab-count" class="nav-count" aria-label="今日待完成数量" hidden></span></button>
             <button id="btn-history" data-view="history" class="nav-btn" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1">历史归档</button>
         </div>
         <div class="topbar-right">
@@ -34,11 +35,40 @@
             <div id="priority-filters" class="filter-group priority-filter-group" aria-label="优先级"></div>
             <div id="label-filters" class="filter-group label-filter-group" aria-label="标签"></div>
             <button id="clear-filters" class="filter-clear" type="button" hidden>清除筛选</button>
+            <button id="board-batch-toggle" class="filter-clear" type="button" title="进入批量选择模式，可多选卡片后批量归档">批量选择</button>
         </div>
         <div id="filter-summary" class="filter-summary" role="status" hidden></div>
         <div id="filter-reorder-hint" class="filter-reorder-hint" role="status" hidden>筛选状态下暂不支持卡片和列手动排序</div>
         <div id="board" class="board" aria-label="看板">
             <!-- 列由 JS 渲染 -->
+        </div>
+        <div id="board-batch-bar" class="batch-bar board-batch-bar" role="status" hidden>
+            <span id="board-batch-count"></span>
+            <button id="board-batch-archive" type="button" class="primary">归档所选</button>
+            <button id="board-batch-exit" type="button" class="ghost">退出选择</button>
+        </div>
+    </main>
+
+    <!-- ============ 今日中心视图 ============ -->
+    <main id="view-today" class="today-view" role="tabpanel" aria-labelledby="btn-today" tabindex="0" hidden>
+        <div class="today-shell">
+            <header class="today-heading">
+                <div>
+                    <p id="today-date" class="today-date"></p>
+                    <h2>今日中心</h2>
+                </div>
+                <div class="today-summary" aria-label="今日任务摘要">
+                    <span><strong id="today-pending-count">0</strong> 待完成</span>
+                    <span><strong id="today-completed-count">0</strong> 已完成</span>
+                    <span><strong id="today-overdue-count">0</strong> 逾期</span>
+                </div>
+            </header>
+            <form id="today-quick-add" class="today-quick-add">
+                <label class="sr-only" for="today-quick-title">快速添加今日任务</label>
+                <input id="today-quick-title" type="text" autocomplete="off" placeholder="快速添加今日任务…">
+                <button id="today-quick-submit" class="primary" type="submit">添加到今日</button>
+            </form>
+            <div id="today-sections" class="today-sections" aria-live="polite"></div>
         </div>
     </main>
 
@@ -132,6 +162,13 @@
             </button>
         </div>
         <div class="search-meta" id="search-meta"></div>
+        <div id="history-batch-bar" class="batch-bar history-batch-bar" role="status" hidden>
+            <span id="history-batch-count"></span>
+            <button id="history-batch-select-page" type="button" class="ghost">全选本页</button>
+            <button id="history-batch-restore" type="button" class="primary">恢复所选</button>
+            <button id="history-batch-delete" type="button" class="ghost danger-text">删除所选</button>
+            <button id="history-batch-clear" type="button" class="ghost">清除选择</button>
+        </div>
         <div id="search-results" class="search-results"></div>
     </main>
 
@@ -169,14 +206,7 @@
                 </div>
                 <fieldset class="settings-fieldset">
                     <legend>主题</legend>
-                    <div id="theme-options" class="theme-options">
-                        <label><input type="radio" name="theme" value="sea-salt-blue" data-theme-value="sea-salt-blue"><span class="theme-option-content"><span class="theme-swatch theme-swatch-sea"></span><span>海盐蓝</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="douban-green" data-theme-value="douban-green"><span class="theme-option-content"><span class="theme-swatch theme-swatch-douban"></span><span>豆瓣绿</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="swiss-mono" data-theme-value="swiss-mono"><span class="theme-option-content"><span class="theme-swatch theme-swatch-swiss"></span><span>瑞士黑白</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="warm-paper" data-theme-value="warm-paper"><span class="theme-option-content"><span class="theme-swatch theme-swatch-paper"></span><span>奶油陶土</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="liquid-glass" data-theme-value="liquid-glass"><span class="theme-option-content"><span class="theme-swatch theme-swatch-glass"></span><span>液态玻璃</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                        <label><input type="radio" name="theme" value="deep-sea-night" data-theme-value="deep-sea-night"><span class="theme-option-content"><span class="theme-swatch theme-swatch-night"></span><span>深海夜</span><span class="theme-check" aria-hidden="true">✓</span></span></label>
-                    </div>
+                    <div id="theme-options" class="theme-options"><!-- 主题选项由 theme-init.js 数据源动态渲染 --></div>
                 </fieldset>
             </section>
 
@@ -212,6 +242,9 @@
                     <span class="field-label" id="card-description-label">描述</span>
                     <div class="editor-toolbar" id="editor-toolbar">
                         <div class="tb-group" role="group" aria-label="列表和缩进">
+                            <button type="button" title="复选框" aria-label="插入复选框" data-action="insert-checkbox">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m8 12 3 3 5-6"/></svg>
+                            </button>
                             <button type="button" title="项目符号" aria-label="项目符号" data-cmd="insertUnorderedList">
                                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="6" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="18" r="1.25" fill="currentColor" stroke="none"/><path d="M10 6h9M10 12h9M10 18h9"/></svg>
                             </button>
@@ -290,11 +323,15 @@
                     </div>
                 </label>
                 <label>优先级
-                    <select id="card-priority">
-                        <option value="high">高</option>
-                        <option value="medium" selected>中</option>
-                        <option value="low">低</option>
-                    </select>
+                    <span class="themed-select" data-select-id="card-priority">
+                        <select id="card-priority" tabindex="-1" aria-hidden="true">
+                            <option value="high">高</option>
+                            <option value="medium" selected>中</option>
+                            <option value="low">低</option>
+                        </select>
+                        <button type="button" class="themed-select-button" aria-haspopup="listbox" aria-expanded="false"></button>
+                        <span class="themed-select-menu" role="listbox" hidden></span>
+                    </span>
                 </label>
                 <div class="field attachment-field" id="attachment-field" role="group" aria-labelledby="attachment-label" aria-describedby="attachment-help">
                     <span class="field-label" id="attachment-label"><span class="label-inline">附件 <small id="attachment-help">(文件保留原始名称。附件上传、覆盖和删除会立即生效，不受卡片保存或取消影响。)</small></span></span>
@@ -303,8 +340,12 @@
                     <button type="button" id="attachment-add-button" class="ghost attachment-add-btn">＋ 添加附件</button>
                     <input id="attachment-input" type="file" multiple hidden>
                 </div>
-                <label>所在列
-                    <select id="card-column"></select>
+                <label id="card-column-field">所在列
+                    <span class="themed-select" data-select-id="card-column">
+                        <select id="card-column" tabindex="-1" aria-hidden="true"></select>
+                        <button type="button" class="themed-select-button" aria-haspopup="listbox" aria-expanded="false"></button>
+                        <span class="themed-select-menu" role="listbox" hidden></span>
+                    </span>
                 </label>
                 <div class="field" id="card-move-controls" hidden>
                     <span class="field-label">调整位置</span>

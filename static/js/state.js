@@ -10,6 +10,7 @@ export const state = {
     sortByColumn: {},
     cardDescriptionDisplay: "two-lines",
     quickCreate: { columnId: null, title: "", submitting: false },
+    todayQuickCreate: { title: "", submitting: false },
     currentCardId: null,
     currentCardCol: null,
     currentCardDraft: false,
@@ -25,8 +26,11 @@ export const state = {
     modalOpener: null,
     searchAbort: null,
     searchCursor: null,
-    searchParams: "",
+    searchConditions: "",
+    searchResults: new Map(),
     historySort: "archived_desc",
+    batchMode: false,
+    batchSelected: new Set(),
 };
 
 export function hasActiveFilters() {
