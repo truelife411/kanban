@@ -11,6 +11,7 @@ from http.server import ThreadingHTTPServer
 from unittest import mock
 from urllib.parse import quote
 
+import config
 import kanban as app
 
 
@@ -21,9 +22,9 @@ class HttpApiTests(unittest.TestCase):
         self.backup_dir = os.path.join(self.temp.name, "backups")
         self.attachments_dir = os.path.join(self.temp.name, "attachments")
         self.patches = [
-            mock.patch.object(app, "DB_PATH", self.db_path),
-            mock.patch.object(app, "BACKUP_DIR", self.backup_dir),
-            mock.patch.object(app, "ATTACHMENTS_DIR", self.attachments_dir),
+            mock.patch.object(config, "DB_PATH", self.db_path),
+            mock.patch.object(config, "BACKUP_DIR", self.backup_dir),
+            mock.patch.object(config, "ATTACHMENTS_DIR", self.attachments_dir),
         ]
         for patch in self.patches:
             patch.start()

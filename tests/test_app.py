@@ -9,6 +9,10 @@ import zipfile
 from datetime import datetime
 from unittest import mock
 
+import backup
+import board
+import config
+import db
 import kanban as app
 
 
@@ -19,9 +23,9 @@ class DatabaseTestCase(unittest.TestCase):
         self.backup_dir = os.path.join(self.temp.name, "backups")
         self.attachments_dir = os.path.join(self.temp.name, "attachments")
         self.patches = [
-            mock.patch.object(app, "DB_PATH", self.db_path),
-            mock.patch.object(app, "BACKUP_DIR", self.backup_dir),
-            mock.patch.object(app, "ATTACHMENTS_DIR", self.attachments_dir),
+            mock.patch.object(config, "DB_PATH", self.db_path),
+            mock.patch.object(config, "BACKUP_DIR", self.backup_dir),
+            mock.patch.object(config, "ATTACHMENTS_DIR", self.attachments_dir),
         ]
         for patch in self.patches:
             patch.start()
@@ -521,7 +525,7 @@ class BackupImportTests(DatabaseTestCase):
             if path.endswith(old_name):
                 raise OSError("locked")
             return real_remove(path)
-        with mock.patch.object(app.os, "remove", side_effect=fail_old), mock.patch.object(app.sys, "stderr", new=io.StringIO()) as stderr:
+        with mock.patch.object(db.os, "remove", side_effect=fail_old), mock.patch.object(db.sys, "stderr", new=io.StringIO()) as stderr:
             path = app.create_backup("test")
         self.assertTrue(os.path.isfile(path))
         self.assertIn("数据库备份清理失败", stderr.getvalue())
@@ -663,7 +667,7 @@ class PermanentDeleteTests(DatabaseTestCase):
     def test_transaction_failure_restores_attachment_directory(self):
         card = self.create_card(app.list_columns(self.conn)[0]["id"], "回滚")
         app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"data"), 4)
-        with mock.patch.object(app, "bump_revision", side_effect=sqlite3.OperationalError("forced")):
+        with mock.patch.object(board, "bump_revision", side_effect=sqlite3.OperationalError("forced")):
             with self.assertRaises(sqlite3.OperationalError):
                 app.permanently_delete_card(self.conn, card["id"], self.with_card_tokens(card["id"]))
         self.assertTrue(os.path.isfile(app.attachment_path(card["id"], "data.bin")))
@@ -677,7 +681,7 @@ class PermanentDeleteTests(DatabaseTestCase):
             if ".permanent-delete-" in path:
                 raise PermissionError("locked")
             return real_rmtree(path, *args, **kwargs)
-        with mock.patch.object(app.shutil, "rmtree", side_effect=fail_rollback):
+        with mock.patch.object(board.shutil, "rmtree", side_effect=fail_rollback):
             app.permanently_delete_card(self.conn, card["id"], self.with_card_tokens(card["id"]))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM cards WHERE id=?", (card["id"],)).fetchone()[0], 0)
         self.assertTrue(any(".permanent-delete-" in path for path in app.MAINTENANCE_REPORT["cleanup"]))
@@ -740,7 +744,7 @@ class AttachmentTests(DatabaseTestCase):
             if ".rollback-" in path:
                 raise PermissionError("locked")
             return real_remove(path)
-        with mock.patch("kanban.os.remove", side_effect=fail_rollback):
+        with mock.patch("attachments.os.remove", side_effect=fail_rollback):
             replaced = app.save_attachment(self.conn, card["id"], "data.bin", "", io.BytesIO(b"new"), 3, True, original["version"])
         self.assertEqual(replaced["version"], 2)
         with open(app.attachment_path(card["id"], "data.bin"), "rb") as handle:
@@ -754,7 +758,7 @@ class AttachmentTests(DatabaseTestCase):
             if ".deleting-" in path:
                 raise PermissionError("locked")
             return real_remove(path)
-        with mock.patch("kanban.os.remove", side_effect=fail_trash):
+        with mock.patch("attachments.os.remove", side_effect=fail_trash):
             app.delete_attachment(self.conn, attachment["id"], attachment["version"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM attachments WHERE id=?", (attachment["id"],)).fetchone()[0], 0)
         self.assertFalse(os.path.exists(app.attachment_path(card["id"], "data.bin")))
