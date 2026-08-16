@@ -96,17 +96,6 @@ export function compactCreatedTime(value, referenceDate = new Date()) {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-export function relativeTimestamp(value, referenceDate = new Date()) {
-    const date = parseLocalTimestamp(value);
-    if (!date) return "未知";
-    const seconds = Math.max(0, Math.floor((referenceDate.getTime() - date.getTime()) / 1000));
-    if (seconds < 60) return "刚刚";
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`;
-    if (seconds < 604800) return `${Math.floor(seconds / 86400)}天前`;
-    return compactCreatedTime(value, referenceDate);
-}
-
 let pickerState = null;
 
 function parseDateValue(value) {

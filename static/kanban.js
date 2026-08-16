@@ -589,12 +589,6 @@ function normalizeDescriptionHtml(html){
     normalizeColorDom(root);
     return root.innerHTML
 }
-function stripHtml(html){
-    const box = document.createElement("div");
-    box.innerHTML = html || "";
-    box.querySelectorAll("br").forEach(node => node.replaceWith("\n"));
-    return (box.innerText || box.textContent || "").replace(/\n{3,}/ g, "\n\n").trim()
-}
 async function showView(view, options = {}){
     if (isCardDirty()){
         const decision = await chooseAction({
@@ -1252,9 +1246,6 @@ function closeTodayDueDialog(restoreFocus = true){
     openTodayDueDialog = null;
     overlay.remove();
     if (restoreFocus && opener?.isConnected) opener.focus()
-}
-function dueAtDate(card, date){
-    return joinDue(date, splitDue(card.due_date).time)
 }
 async function updateTodayCardDue(card, dueDate, message){
     const payload = {
@@ -2045,7 +2036,7 @@ function findAllMatches(text, terms){
     return merged
 }
 function escapeHtmlText(value){
-    return value.replace(/&/ g, "&amp;").replace(/</ g, "&lt;").replace(/>/ g, "&gt;")
+    return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }
 function highlightPlainText(text, terms){
     if (!terms.length) return escapeHtmlText(text);
@@ -2333,7 +2324,7 @@ function downloadBlob(blob, fileName){
     setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 function responseFileName(response, fallback){
-    const value = response.headers.get("Content-Disposition") || "", utf8 = value.match(/filename\*=UTF-8''([^;]+)/ i), plain = value.match(/filename="?([^";]+)"?/ i);
+    const value = response.headers.get("Content-Disposition") || "", utf8 = value.match(/filename\*=UTF-8''([^;]+)/i), plain = value.match(/filename="?([^";]+)"?/i);
     try {
         return decodeURIComponent(utf8?.[1] || plain?.[1] || fallback)
     } catch (_){

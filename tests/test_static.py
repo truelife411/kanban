@@ -520,7 +520,7 @@ class AccessibilityContractTests(unittest.TestCase):
         for sort_value in ("position", "updated_desc", "updated_asc", "created_desc", "created_asc"):
             self.assertIn(f'["{sort_value}",', app_js)
         self.assertIn("parseLocalTimestamp", dates_js)
-        self.assertIn("relativeTimestamp", dates_js)
+        self.assertNotIn("relativeTimestamp", dates_js)
         self.assertNotIn("new Date(value)", dates_js)
         self.assertIn("sortCards(cards,column.id).forEach", app_js)
         self.assertIn("renderColumnSort(column,actions)", app_js)

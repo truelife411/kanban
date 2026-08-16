@@ -27,7 +27,6 @@ export const state = {
     searchAbort: null,
     searchCursor: null,
     searchConditions: "",
-    searchParams: "",
     searchResults: new Map(),
     historySort: "archived_desc",
     batchMode: false,
