@@ -26,6 +26,7 @@ export const state = {
     modalOpener: null,
     searchAbort: null,
     searchCursor: null,
+    searchConditions: "",
     searchParams: "",
     historySort: "archived_desc",
 };

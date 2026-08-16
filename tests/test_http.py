@@ -426,7 +426,7 @@ class HttpApiTests(unittest.TestCase):
             "expected_board_revision": board["revision"],
         })
         self.assertEqual(status, 409)
-        self.assertEqual(json.loads(body)["error"]["code"], "CARD_VERSION_CONFLICT")
+        self.assertEqual(json.loads(body)["error"]["code"], "VERSION_CONFLICT")
 
     def test_static_assets_require_revalidation(self):
         for path in (

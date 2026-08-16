@@ -1421,6 +1421,10 @@ def decode_search_cursor(value, sort):
         raise ApiError("搜索游标无效，请重新搜索", 400, "INVALID_CURSOR")
 
 
+def like_escape(value):
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, include_active=False, cursor=None, limit=50, sort="archived_desc", created_from=None, created_to=None, updated_from=None, updated_to=None):
     if date_from: validate_due_date(date_from)
     if date_to: validate_due_date(date_to)
@@ -1445,10 +1449,10 @@ def search_cards_page(conn, q="", date_from=None, date_to=None, priority=None, i
     params = []
     if not include_active: sql += " AND cards.archived=1"
     if q:
-        name_query = "%%%s%%" % attachment_name_key(q)
-        sql += """ AND (cards.title LIKE ? OR cards.description LIKE ? OR cards.labels LIKE ? OR EXISTS
-                             (SELECT 1 FROM attachments WHERE attachments.card_id=cards.id AND attachments.name_key LIKE ?))"""
-        params.extend(["%%%s%%" % q] * 3 + [name_query])
+        name_query = "%%%s%%" % like_escape(attachment_name_key(q))
+        sql += """ AND (cards.title LIKE ? ESCAPE '\\' OR cards.description LIKE ? ESCAPE '\\' OR cards.labels LIKE ? ESCAPE '\\' OR EXISTS
+                     (SELECT 1 FROM attachments WHERE attachments.card_id=cards.id AND attachments.name_key LIKE ? ESCAPE '\\'))"""
+        params.extend(["%%%s%%" % like_escape(q)] * 3 + [name_query])
     if date_from: sql += " AND substr(cards.due_date,1,10)>=?"; params.append(date_from[:10])
     if date_to: sql += " AND substr(cards.due_date,1,10)<=?"; params.append(date_to[:10])
     if created_from: sql += " AND substr(cards.created_at,1,10)>=?"; params.append(created_from[:10])
@@ -1574,6 +1578,7 @@ def import_replace(conn, request):
                                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""", (card["id"], card["column_id"], card["title"], card["description"], card["labels"], card["due_date"], card["planned_date"], card["planned_position"], card["priority"], card["position"], card["archived"], card["created_at"], card["updated_at"], card["completed_at"], card["archived_at"], card["archive_reason"], card["version"]))
                 revision = bump_revision(conn)
                 if conn.execute("PRAGMA foreign_key_check").fetchone() is not None: raise ApiError("导入数据外键检查失败", 422, "INVALID_IMPORT_REFERENCE")
+                validate_board_invariants(conn)
         except Exception:
             shutil.rmtree(ATTACHMENTS_DIR, ignore_errors=True)
             if os.path.isdir(rollback_dir): os.replace(rollback_dir, ATTACHMENTS_DIR)
@@ -2069,77 +2074,77 @@ class Handler(BaseHTTPRequestHandler):
                     pass
 
     def _dispatch_api(self, conn, method, path, query, mutation=False):
-            if path == "/api/board" and method == "GET": return self._send_json(get_board(conn))
-            if path == "/api/columns" and method == "GET": return self._send_json(list_columns(conn))
-            if path == "/api/columns" and method == "POST": return self._send_json(create_column(conn, self._read_json_body()), 201)
-            if path == "/api/columns/reorder" and method == "POST": return self._send_json(reorder_columns(conn, self._read_json_body()))
-            match = re.fullmatch(r"/api/columns/(\d+)", path)
-            if match:
-                cid = int(match.group(1))
-                if method == "PUT": return self._send_json(update_column(conn, cid, self._read_json_body()))
-                if method == "DELETE": return self._send_json(delete_column(conn, cid, self._read_json_body()))
-            if path == "/api/cards" and method == "GET":
-                raw = query.get("column_id", [None])[0]
-                if raw is not None and not raw.isdigit(): fail("column_id 无效", field="column_id")
-                return self._send_json(list_cards(conn, int(raw) if raw is not None else None))
-            if path == "/api/cards" and method == "POST": return self._send_json(create_card(conn, self._read_json_body()), 201)
-            if path == "/api/cards/drafts" and method == "POST": return self._send_json(create_card_draft(conn, self._read_json_body()), 201)
-            match = re.fullmatch(r"/api/cards/(\d+)", path)
-            if match:
-                cid = int(match.group(1))
-                if method == "GET": return self._send_json(get_card(conn, cid))
-                if method == "PUT": return self._send_json(update_card(conn, cid, self._read_json_body()))
-                if method == "DELETE": return self._send_json(archive_card(conn, cid, self._read_json_body()))
-            match = re.fullmatch(r"/api/cards/(\d+)/permanent", path)
-            if match and method == "DELETE": return self._send_json(permanently_delete_card(conn, int(match.group(1)), self._read_json_body()))
-            for suffix, action, verb in (("move", move_card, "PUT"), ("plan", plan_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST"), ("finalize", finalize_card_draft, "PUT")):
-                match = re.fullmatch(r"/api/cards/(\d+)/%s" % suffix, path)
-                if match and method == verb: return self._send_json(action(conn, int(match.group(1)), self._read_json_body()))
-            match = re.fullmatch(r"/api/cards/(\d+)/draft", path)
-            if match and method == "DELETE":
-                header = self.headers.get("X-Card-Version")
-                if not header or not header.isdigit(): raise ApiError("草稿版本无效", 400, "INVALID_VERSION")
-                return self._send_json(delete_card_draft(conn, int(match.group(1)), int(header)))
-            match = re.fullmatch(r"/api/cards/(\d+)/attachments", path)
-            if match:
-                card_id = int(match.group(1))
-                if method == "GET": return self._send_json(list_attachments(conn, card_id))
-                if method == "POST":
-                    length = self._content_length(MAX_ATTACHMENT_BODY)
-                    encoded_name = self.headers.get("X-File-Name", "")
-                    try: file_name = unquote(encoded_name, encoding="utf-8", errors="strict")
-                    except UnicodeDecodeError: raise ApiError("文件名编码无效", 400, "INVALID_FILE_NAME")
-                    replace = query.get("replace", ["0"])[0] in ("1", "true")
-                    version_header = self.headers.get("X-Attachment-Version")
-                    if replace and (not version_header or not version_header.isdigit()): raise ApiError("覆盖附件需要有效版本", 400, "INVALID_VERSION")
-                    expected_version = int(version_header) if version_header and version_header.isdigit() else None
-                    attachment = save_attachment(conn, card_id, file_name, self.headers.get("X-File-Type", ""), self.rfile, length, replace, expected_version)
-                    return self._send_json(attachment, 200 if replace else 201)
-            match = re.fullmatch(r"/api/attachments/(\d+)(?:/(download))?", path)
-            if match:
-                attachment_id = int(match.group(1))
-                if method == "GET" and match.group(2) == "download": return self._send_attachment(get_attachment(conn, attachment_id))
-                if method == "DELETE":
-                    version_header = self.headers.get("X-Attachment-Version")
-                    if not version_header or not version_header.isdigit(): raise ApiError("附件版本无效", 400, "INVALID_VERSION")
-                    return self._send_json(delete_attachment(conn, attachment_id, int(version_header)))
-            if path == "/api/search" and method == "GET":
-                return self._send_json(search_cards_page(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true"), query.get("cursor", [None])[0], query.get("limit", [50])[0], query.get("sort", ["archived_desc"])[0], query.get("created_from", [None])[0], query.get("created_to", [None])[0], query.get("updated_from", [None])[0], query.get("updated_to", [None])[0]))
-            if path == "/api/export" and method == "GET":
-                body = json.dumps(export_data(conn), ensure_ascii=False, indent=2).encode("utf-8"); filename = "kanban-export-%s.json" % datetime.now().strftime("%Y%m%d-%H%M%S")
-                self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename); self._security_headers(); self.end_headers(); self.wfile.write(body); return
-            if path == "/api/backup/check" and method == "GET": return self._send_json(backup_readiness(conn))
-            if path == "/api/backup" and method == "GET": return self._send_backup()
-            if path == "/api/import/zip/preview" and method == "POST":
-                length = self._content_length(MAX_ZIP_BODY)
-                if length == 0: raise ApiError("ZIP 文件不能为空", 400, "INVALID_BACKUP")
-                return self._send_json(stage_full_backup(self.rfile, length))
-            if path == "/api/import/zip" and method == "POST":
-                request = self._read_json_body()
-                return self._send_json(restore_full_backup(conn, require_string(request.get("token"), "token", 1, 100), request.get("expected_board_revision")))
-            if path == "/api/import/preview" and method == "POST": return self._send_json(import_preview(self._read_json_body(MAX_IMPORT_BODY)))
-            if path == "/api/import" and method == "POST": return self._send_json(import_replace(conn, self._read_json_body(MAX_IMPORT_BODY)))
-            raise ApiError("未知的 API 路径", 404, "NOT_FOUND")
+        if path == "/api/board" and method == "GET": return self._send_json(get_board(conn))
+        if path == "/api/columns" and method == "GET": return self._send_json(list_columns(conn))
+        if path == "/api/columns" and method == "POST": return self._send_json(create_column(conn, self._read_json_body()), 201)
+        if path == "/api/columns/reorder" and method == "POST": return self._send_json(reorder_columns(conn, self._read_json_body()))
+        match = re.fullmatch(r"/api/columns/(\d+)", path)
+        if match:
+            cid = int(match.group(1))
+            if method == "PUT": return self._send_json(update_column(conn, cid, self._read_json_body()))
+            if method == "DELETE": return self._send_json(delete_column(conn, cid, self._read_json_body()))
+        if path == "/api/cards" and method == "GET":
+            raw = query.get("column_id", [None])[0]
+            if raw is not None and not raw.isdigit(): fail("column_id 无效", field="column_id")
+            return self._send_json(list_cards(conn, int(raw) if raw is not None else None))
+        if path == "/api/cards" and method == "POST": return self._send_json(create_card(conn, self._read_json_body()), 201)
+        if path == "/api/cards/drafts" and method == "POST": return self._send_json(create_card_draft(conn, self._read_json_body()), 201)
+        match = re.fullmatch(r"/api/cards/(\d+)", path)
+        if match:
+            cid = int(match.group(1))
+            if method == "GET": return self._send_json(get_card(conn, cid))
+            if method == "PUT": return self._send_json(update_card(conn, cid, self._read_json_body()))
+            if method == "DELETE": return self._send_json(archive_card(conn, cid, self._read_json_body()))
+        match = re.fullmatch(r"/api/cards/(\d+)/permanent", path)
+        if match and method == "DELETE": return self._send_json(permanently_delete_card(conn, int(match.group(1)), self._read_json_body()))
+        for suffix, action, verb in (("move", move_card, "PUT"), ("plan", plan_card, "PUT"), ("restore", restore_card, "POST"), ("copy", copy_card, "POST"), ("finalize", finalize_card_draft, "PUT")):
+            match = re.fullmatch(r"/api/cards/(\d+)/%s" % suffix, path)
+            if match and method == verb: return self._send_json(action(conn, int(match.group(1)), self._read_json_body()))
+        match = re.fullmatch(r"/api/cards/(\d+)/draft", path)
+        if match and method == "DELETE":
+            header = self.headers.get("X-Card-Version")
+            if not header or not header.isdigit(): raise ApiError("草稿版本无效", 400, "INVALID_VERSION")
+            return self._send_json(delete_card_draft(conn, int(match.group(1)), int(header)))
+        match = re.fullmatch(r"/api/cards/(\d+)/attachments", path)
+        if match:
+            card_id = int(match.group(1))
+            if method == "GET": return self._send_json(list_attachments(conn, card_id))
+            if method == "POST":
+                length = self._content_length(MAX_ATTACHMENT_BODY)
+                encoded_name = self.headers.get("X-File-Name", "")
+                try: file_name = unquote(encoded_name, encoding="utf-8", errors="strict")
+                except UnicodeDecodeError: raise ApiError("文件名编码无效", 400, "INVALID_FILE_NAME")
+                replace = query.get("replace", ["0"])[0] in ("1", "true")
+                version_header = self.headers.get("X-Attachment-Version")
+                if replace and (not version_header or not version_header.isdigit()): raise ApiError("覆盖附件需要有效版本", 400, "INVALID_VERSION")
+                expected_version = int(version_header) if version_header and version_header.isdigit() else None
+                attachment = save_attachment(conn, card_id, file_name, self.headers.get("X-File-Type", ""), self.rfile, length, replace, expected_version)
+                return self._send_json(attachment, 200 if replace else 201)
+        match = re.fullmatch(r"/api/attachments/(\d+)(?:/(download))?", path)
+        if match:
+            attachment_id = int(match.group(1))
+            if method == "GET" and match.group(2) == "download": return self._send_attachment(get_attachment(conn, attachment_id))
+            if method == "DELETE":
+                version_header = self.headers.get("X-Attachment-Version")
+                if not version_header or not version_header.isdigit(): raise ApiError("附件版本无效", 400, "INVALID_VERSION")
+                return self._send_json(delete_attachment(conn, attachment_id, int(version_header)))
+        if path == "/api/search" and method == "GET":
+            return self._send_json(search_cards_page(conn, query.get("q", [""])[0], query.get("from", [None])[0], query.get("to", [None])[0], query.get("priority", [None])[0], query.get("all", ["0"])[0].lower() in ("1", "true"), query.get("cursor", [None])[0], query.get("limit", [50])[0], query.get("sort", ["archived_desc"])[0], query.get("created_from", [None])[0], query.get("created_to", [None])[0], query.get("updated_from", [None])[0], query.get("updated_to", [None])[0]))
+        if path == "/api/export" and method == "GET":
+            body = json.dumps(export_data(conn), ensure_ascii=False, indent=2).encode("utf-8"); filename = "kanban-export-%s.json" % datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(body))); self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename); self._security_headers(); self.end_headers(); self.wfile.write(body); return
+        if path == "/api/backup/check" and method == "GET": return self._send_json(backup_readiness(conn))
+        if path == "/api/backup" and method == "GET": return self._send_backup()
+        if path == "/api/import/zip/preview" and method == "POST":
+            length = self._content_length(MAX_ZIP_BODY)
+            if length == 0: raise ApiError("ZIP 文件不能为空", 400, "INVALID_BACKUP")
+            return self._send_json(stage_full_backup(self.rfile, length))
+        if path == "/api/import/zip" and method == "POST":
+            request = self._read_json_body()
+            return self._send_json(restore_full_backup(conn, require_string(request.get("token"), "token", 1, 100), request.get("expected_board_revision")))
+        if path == "/api/import/preview" and method == "POST": return self._send_json(import_preview(self._read_json_body(MAX_IMPORT_BODY)))
+        if path == "/api/import" and method == "POST": return self._send_json(import_replace(conn, self._read_json_body(MAX_IMPORT_BODY)))
+        raise ApiError("未知的 API 路径", 404, "NOT_FOUND")
 
     def _allowed_methods(self, path):
         if path in ("/api/board", "/api/search", "/api/export", "/api/backup", "/api/backup/check"):

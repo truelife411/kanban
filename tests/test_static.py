@@ -143,7 +143,8 @@ class AccessibilityContractTests(unittest.TestCase):
     def test_theme_settings_and_themes_exist(self):
         theme_init_js = (ROOT / "static" / "theme-init.js").read_text(encoding="utf-8")
         app_js = (ROOT / "static" / "kanban.js").read_text(encoding="utf-8")
-        themes = ("mint", "douban-green", "swiss-mono", "sea-salt-blue", "oat", "pearl", "liquid-glass", "deep-sea-night", "aurora", "aurora-glass", "pixel-arcade", "forest-night", "mist-pine-night")
+        themes = ("mint", "douban-green", "swiss-mono", "sea-salt-blue", "oat", "pearl", "liquid-glass", "deep-sea-night", "aurora", "aurora-glass", "pixel-arcade", "forest-night", "mist-pine-night", "ink-wash")
+        theme_names = ("薄荷绿", "豆瓣绿", "黑白", "海盐蓝", "燕麦", "珍珠", "玻璃", "深海夜", "极光", "极光玻璃", "像素街机", "森林夜", "雾凇夜", "水墨山水")
         legacy_themes = (
             "cloud-blue", "navy-blue", "aurora-blue", "douban-classic",
             "douban-modern", "office", "dark-tech",
@@ -153,17 +154,22 @@ class AccessibilityContractTests(unittest.TestCase):
         self.assertNotIn('id="theme-button"', self.html)
         self.assertNotIn('id="theme-menu"', self.html)
         self.assertIn('data-theme="mint"', self.html)
-        for theme, name in zip(themes, ("薄荷绿", "豆瓣绿", "黑白", "海盐蓝", "燕麦", "珍珠", "玻璃", "深海夜", "极光", "极光玻璃", "像素街机", "森林夜", "雾凇夜")):
-            self.assertIn(f'value="{theme}"', self.html)
-            self.assertIn(f'data-theme-value="{theme}"', self.html)
-            self.assertIn(name, self.html)
+        self.assertIn("window.__KANBAN_THEMES__", theme_init_js)
+        self.assertIn("window.__KANBAN_LEGACY_THEMES__", theme_init_js)
+        self.assertIn("window.__KANBAN_THEMES__", app_js)
+        self.assertIn("window.__KANBAN_LEGACY_THEMES__", app_js)
+        self.assertIn("renderThemeOptions", app_js)
+        for theme, name in zip(themes, theme_names):
             self.assertIn(f'"{theme}"', theme_init_js)
-            self.assertIn(f'"{theme}"', app_js)
+            self.assertIn(name, theme_init_js)
             self.assertEqual(len(re.findall(rf':root\[data-theme="{re.escape(theme)}"\]\s*\{{', self.css)), 1)
         for legacy_theme in legacy_themes:
             self.assertNotIn(legacy_theme, self.html)
-            self.assertNotIn(legacy_theme, self.html)
             self.assertNotIn(f'data-theme="{legacy_theme}"', self.css)
+        for dead_theme in ("warm-paper", "terracotta", "tianqing", "dailan", "qunqing", "qiuxiang", "apricot", "sandstone", "aurora-night", "mushanzi", "morandi", "mist-pine"):
+            self.assertNotIn(f'data-theme="{dead_theme}"', self.css)
+            self.assertNotIn(f'data-theme="{dead_theme}"', self.html)
+            self.assertNotIn(f'data-theme="{dead_theme}"', app_js)
         expected_migrations = {
             "cloud-blue": "sea-salt-blue",
             "navy-blue": "sea-salt-blue",
@@ -177,7 +183,6 @@ class AccessibilityContractTests(unittest.TestCase):
             with self.subTest(old_theme=old_theme, new_theme=new_theme):
                 mapping_pattern = rf'["\']{re.escape(old_theme)}["\']\s*:\s*["\']{re.escape(new_theme)}["\']'
                 self.assertRegex(theme_init_js, mapping_pattern)
-                self.assertRegex(app_js, mapping_pattern)
 
         compact_css = "".join(self.css.split())
         for theme in themes:
